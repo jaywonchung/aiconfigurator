@@ -9,7 +9,14 @@ from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 import tensorrt_llm.quantization.utils.fp4_utils as fp4_utils
 import math
-from helper import getSMVersion, log_perf
+import time
+from helper import (
+    getSMVersion,
+    log_perf,
+    is_gemm_compute_bound,
+    measure_memory_bound_kernel_power,
+    get_compute_bound_power
+)
 
 def get_gemm_test_cases():
     x_list = [1,2,4,8,16,32,48,64,80,96,128,160,192,256,384,512,768,1024,2048,4096,8192]
@@ -39,11 +46,26 @@ def get_gemm_test_cases():
     return test_cases
 
 
-def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0'):
+def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0',
+             zeus_monitor=None, power_limit=None, benchmark_duration=3.0):
+    """
+    Run GEMM benchmark with optional energy profiling.
+
+    Args:
+        gemm_type: GEMM quantization type
+        m, n, k: Matrix dimensions
+        perf_filename: Output CSV filename
+        device: CUDA device
+        zeus_monitor: ZeusMonitor instance (optional)
+        power_limit: GPU power limit in Watts (optional)
+        benchmark_duration: Target duration for memory-bound benchmarks
+    """
     device = torch.device(device)
+    device_id = device.index
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
+    device_name = torch.cuda.get_device_name(device)
     dtype = torch.bfloat16
     x = torch.randn((m, k), dtype=dtype).to(torch.device(device))
 
@@ -107,26 +129,82 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0'):
     # warmup
     for i in range(num_warmups):
         g.replay()
+    torch.cuda.synchronize()
 
+    # Warmup latency measurement
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
-    for i in range(num_runs):
-        g.replay()
+    g.replay()
     end_event.record()
     torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event)/num_runs/len(op_list)
+    warmup_latency = start_event.elapsed_time(end_event) / len(op_list)
 
-    log_perf(item_list=[{ 
-                'gemm_dtype': gemm_type,
-                'm': m,
-                'n': n,
-                'k': k,
-                'latency': latency
-                }], 
-    framework='TRTLLM', 
-    version=tensorrt_llm.__version__, 
-    device_name=torch.cuda.get_device_name(device), 
-    op_name='gemm', 
-    kernel_source='torch_flow', 
-    perf_filename=perf_filename)
+    # Determine if compute-bound
+    compute_bound = is_gemm_compute_bound(m, n, k, gemm_type, device_name)
+
+    # Energy/power measurement
+    if power_limit is not None and zeus_monitor is not None:
+        if compute_bound:
+            # Compute-bound: power = power_limit, use warmup latency
+            latency = warmup_latency
+            power = get_compute_bound_power(power_limit)
+            benchmark_start_time = None
+            benchmark_end_time = None
+        else:
+            # Memory-bound: measure power over target duration
+            def warmup_fn():
+                for _ in range(num_warmups):
+                    g.replay()
+
+            def benchmark_fn():
+                g.replay()
+
+            latency, power, benchmark_start_time, benchmark_end_time = \
+                measure_memory_bound_kernel_power(
+                    zeus_monitor,
+                    warmup_fn,
+                    benchmark_fn,
+                    warmup_latency,
+                    target_duration_sec=benchmark_duration
+                )
+    else:
+        # No power limit specified - legacy mode
+        start_event.record()
+        for i in range(num_runs):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        latency = start_event.elapsed_time(end_event) / num_runs / len(op_list)
+        power = None
+        power_limit = None
+        compute_bound = None
+        benchmark_start_time = None
+        benchmark_end_time = None
+
+    # Build result item
+    item = {
+        'gemm_dtype': gemm_type,
+        'm': m,
+        'n': n,
+        'k': k,
+        'latency': latency,
+    }
+
+    if power is not None:
+        item['power_limit'] = power_limit
+        item['power'] = power
+        item['compute_bound'] = int(compute_bound)
+        if benchmark_start_time is not None:
+            item['benchmark_start_time'] = benchmark_start_time
+            item['benchmark_end_time'] = benchmark_end_time
+
+    log_perf(
+        item_list=[item],
+        framework='TRTLLM',
+        version=tensorrt_llm.__version__,
+        device_name=device_name,
+        op_name='gemm',
+        kernel_source='torch_flow',
+        perf_filename=perf_filename
+    )

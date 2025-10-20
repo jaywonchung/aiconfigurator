@@ -36,10 +36,13 @@ class InferenceSummary(object):
         """
         self._runtime_config = runtime_config
 
-        # raw data dict        
+        # raw data dict
         self._memory = {}
         self._context_latency_dict = {}
         self._generation_latency_dict = {}
+        self._context_energy_dict = {}
+        self._generation_energy_dict = {}
+        self._avg_power = 0.0  # Time-weighted average power in Watts
         self._is_oom = None
 
         # summary dataframe
@@ -70,17 +73,53 @@ class InferenceSummary(object):
         """
         self._generation_latency_dict = generation_latency_dict
 
+    def set_context_energy_dict(self, context_energy_dict: dict) -> None:
+        """
+        Set context energy dict.
+        """
+        self._context_energy_dict = context_energy_dict
+
+    def set_generation_energy_dict(self, generation_energy_dict: dict) -> None:
+        """
+        Set generation energy dict.
+        """
+        self._generation_energy_dict = generation_energy_dict
+
     def get_context_latency_dict(self) -> dict:
         """
         Get context latency dict.
         """
         return self._context_latency_dict
-    
+
     def get_generation_latency_dict(self) -> dict:
         """
         Get generation latency dict.
         """
         return self._generation_latency_dict
+
+    def get_context_energy_dict(self) -> dict:
+        """
+        Get context energy dict.
+        """
+        return self._context_energy_dict
+
+    def get_generation_energy_dict(self) -> dict:
+        """
+        Get generation energy dict.
+        """
+        return self._generation_energy_dict
+
+    def set_avg_power(self, avg_power: float) -> None:
+        """
+        Set average power in Watts.
+        """
+        self._avg_power = avg_power
+
+    def get_avg_power(self) -> float:
+        """
+        Get average power in Watts.
+        """
+        return self._avg_power
 
     def check_oom(self) -> bool:
         """

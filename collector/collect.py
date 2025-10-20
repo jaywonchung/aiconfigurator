@@ -53,26 +53,39 @@ import traceback
 import json
 from datetime import datetime
 import logging
-from helper import setup_logging, setup_signal_handlers, save_error_report, \
-create_test_case_id
+from helper import (
+    setup_logging,
+    setup_signal_handlers,
+    save_error_report,
+    create_test_case_id,
+    set_gpu_power_limit,
+)
 from typing import List
+
+from zeus.monitor import ZeusMonitor, PowerMonitor
 
 logger = None
 
-def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes):
+# Power limit configuration
+H100_DEFAULT_POWER_LIMITS = [700, 600, 500, 400, 300]
+DEFAULT_BENCHMARK_DURATION = 3.0  # seconds
+
+def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes,
+                       power_limits=None, benchmark_duration=DEFAULT_BENCHMARK_DURATION):
     """Safely collect module with comprehensive error handling"""
     full_name = f"{module_name}.{test_type}"
     logger.info(f"Starting collection: {full_name}")
-    
+
     try:
         # Get test cases
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
         # Run collection
-        errors = parallel_run(test_cases, run_func, num_processes, full_name)
-        
+        errors = parallel_run(test_cases, run_func, num_processes, full_name,
+                            power_limits=power_limits, benchmark_duration=benchmark_duration)
+
         return errors
-        
+
     except Exception as e:
         logger.error(f"Failed to collect {full_name}: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
@@ -83,27 +96,47 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
             'traceback': traceback.format_exc()
         }]
 
-def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"):
-    """worker with automatic logging setup"""
+def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown",
+          power_limits=None, benchmark_duration=DEFAULT_BENCHMARK_DURATION):
+    """
+    Worker with power limit sweep for computation kernels.
 
+    Args:
+        power_limits: List of power limits to sweep (for computation kernels only)
+        benchmark_duration: Target duration for memory-bound benchmarks
+    """
     # Setup logging for this worker - reads config from environment automatically
     worker_logger = setup_logging(worker_id=device_id)
-    
+
     # Setup signal handlers
     setup_signal_handlers(device_id, error_queue)
-    
+
     # Setup device
     device = torch.device(f'cuda:{device_id}')
     torch.cuda.set_device(device_id)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
-    
+
+    # Initialize Zeus monitors if available
+    zeus_monitor = None
+    power_monitor = None
+    if power_limits:
+        try:
+            zeus_monitor = ZeusMonitor(gpu_indices=[device_id])
+            power_monitor = PowerMonitor(gpu_indices=[device_id], update_period=0.1)
+            worker_logger.info(f"Zeus power monitoring enabled on device {device_id}")
+        except Exception as e:
+            worker_logger.warning(f"Failed to initialize Zeus: {e}")
+
+    # Check if this is a communication kernel (no power sweep)
+    is_communication = 'allreduce' in module_name.lower() or 'nccl' in module_name.lower() or 'comm' in module_name.lower()
+
     # Process tasks
     while True:
         task_info = queue.get()
         if task_info is None:
             worker_logger.debug("Received termination signal")
             break
-            
+
         # Handle both old format (tuple) and new format (dict)
         if isinstance(task_info, dict):
             task_id = task_info.get('id', 'unknown')
@@ -111,52 +144,151 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
         else:
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
-        
-        with lock:
-            progress_value.value += 1
-            
-        try:
-            worker_logger.debug(f"Starting task {task_id}")
-            result = func(*task, device)
-            worker_logger.debug(f"Completed task {task_id}")
-        except Exception as e:
-            error_info = {
-                'module': module_name,
-                'device_id': device_id,
-                'task_id': task_id,
-                'task_params': str(task),
-                'error_type': type(e).__name__,
-                'error_message': str(e),
-                'traceback': traceback.format_exc(),
-                'timestamp': datetime.now().isoformat()
-            }
-            
-            if error_queue:
-                error_queue.put(error_info)
-            
-            worker_logger.error(f"Task {task_id} failed: {type(e).__name__}: {e}")
-            worker_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
-            
-            # Force flush logs
-            for handler in worker_logger.handlers:
-                handler.flush()
 
-def parallel_run(tasks, func, num_processes, module_name="unknown"):
-    """parallel runner with error collection"""
+        if is_communication:
+            # Communication: run once at default power limit
+            with lock:
+                progress_value.value += 1
+
+            try:
+                worker_logger.debug(f"Starting communication task {task_id}")
+                if zeus_monitor:
+                    result = func(*task, device, zeus_monitor=zeus_monitor,
+                                benchmark_duration=benchmark_duration)
+                else:
+                    result = func(*task, device)
+                worker_logger.debug(f"Completed task {task_id}")
+            except Exception as e:
+                error_info = {
+                    'module': module_name,
+                    'device_id': device_id,
+                    'task_id': task_id,
+                    'task_params': str(task),
+                    'error_type': type(e).__name__,
+                    'error_message': str(e),
+                    'traceback': traceback.format_exc(),
+                    'timestamp': datetime.now().isoformat()
+                }
+
+                if error_queue:
+                    error_queue.put(error_info)
+
+                worker_logger.error(f"Task {task_id} failed: {type(e).__name__}: {e}")
+                worker_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+
+                # Force flush logs
+                for handler in worker_logger.handlers:
+                    handler.flush()
+        else:
+            # Computation: sweep power limits or run once
+            if power_limits and zeus_monitor:
+                for power_limit in power_limits:
+                    with lock:
+                        progress_value.value += 1
+
+                    # Set power limit
+                    try:
+                        set_gpu_power_limit(device_id, power_limit)
+                        worker_logger.debug(f"Set power limit to {power_limit}W on device {device_id}")
+                    except Exception as e:
+                        worker_logger.warning(f"Failed to set power limit: {e}")
+
+                    try:
+                        worker_logger.debug(f"Starting task {task_id} at {power_limit}W")
+                        result = func(*task, device, zeus_monitor=zeus_monitor,
+                                    power_limit=power_limit,
+                                    benchmark_duration=benchmark_duration)
+                        worker_logger.debug(f"Completed task {task_id} at {power_limit}W")
+                    except Exception as e:
+                        error_info = {
+                            'module': module_name,
+                            'device_id': device_id,
+                            'task_id': task_id,
+                            'power_limit': power_limit,
+                            'task_params': str(task),
+                            'error_type': type(e).__name__,
+                            'error_message': str(e),
+                            'traceback': traceback.format_exc(),
+                            'timestamp': datetime.now().isoformat()
+                        }
+
+                        if error_queue:
+                            error_queue.put(error_info)
+
+                        worker_logger.error(f"Task {task_id} failed at {power_limit}W: {type(e).__name__}: {e}")
+                        worker_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+
+                        # Force flush logs
+                        for handler in worker_logger.handlers:
+                            handler.flush()
+            else:
+                # Legacy mode - no power limit
+                with lock:
+                    progress_value.value += 1
+
+                try:
+                    worker_logger.debug(f"Starting task {task_id}")
+                    result = func(*task, device)
+                    worker_logger.debug(f"Completed task {task_id}")
+                except Exception as e:
+                    error_info = {
+                        'module': module_name,
+                        'device_id': device_id,
+                        'task_id': task_id,
+                        'task_params': str(task),
+                        'error_type': type(e).__name__,
+                        'error_message': str(e),
+                        'traceback': traceback.format_exc(),
+                        'timestamp': datetime.now().isoformat()
+                    }
+
+                    if error_queue:
+                        error_queue.put(error_info)
+
+                    worker_logger.error(f"Task {task_id} failed: {type(e).__name__}: {e}")
+                    worker_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+
+                    # Force flush logs
+                    for handler in worker_logger.handlers:
+                        handler.flush()
+
+    # Save power timeline if available
+    if power_monitor:
+        try:
+            power_timeline = power_monitor.get_all_power_timelines()
+            timeline_file = f'power_timeline_worker_{device_id}.json'
+            with open(timeline_file, 'w') as f:
+                json.dump(power_timeline, f)
+            worker_logger.info(f"Saved power timeline to {timeline_file}")
+        except Exception as e:
+            worker_logger.warning(f"Failed to save power timeline: {e}")
+
+def parallel_run(tasks, func, num_processes, module_name="unknown",
+                power_limits=None, benchmark_duration=DEFAULT_BENCHMARK_DURATION):
+    """parallel runner with error collection and power profiling"""
     queue = mp.Queue()
     error_queue = mp.Queue()
     processes = []
     manager = mp.Manager()
     progress_value = manager.Value('i', 0)
     lock = manager.Lock()
-    
+
+    # Calculate total tasks considering power limit sweeps
+    total_tasks = len(tasks)
+    if power_limits and 'comm' not in module_name.lower() and 'allreduce' not in module_name.lower():
+        total_tasks = len(tasks) * len(power_limits)
+        logger.info(f"Power profiling enabled: {len(tasks)} tasks × {len(power_limits)} power limits = {total_tasks} total runs")
+    else:
+        logger.info(f"Running {total_tasks} tasks (no power sweep)")
+
     # Track process health
     process_stats = {i: {'restarts': 0, 'errors': []} for i in range(num_processes)}
-    
+
     def start_process(device_id):
         p = mp.Process(
-            target=worker, 
-            args=(queue, device_id, func, progress_value, lock, error_queue, module_name)
+            target=worker,
+            args=(queue, device_id, func, progress_value, lock, error_queue, module_name,
+                  power_limits, benchmark_duration)
         )
         p.start()
         logger.info(f"Started worker process {p.pid} on device {device_id}")
@@ -216,13 +348,13 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     
     # Monitor progress with error collection
     errors = []
-    with tqdm(total=len(tasks), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
-            
+    with tqdm(total=total_tasks, desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
+
         last_progress = 0
         stall_count = 0
         last_error_count = 0
 
-        while progress_value.value < len(tasks):
+        while progress_value.value < total_tasks:
             # Drain errors
             while not error_queue.empty():
                 error = error_queue.get()
@@ -238,7 +370,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             if progress_value.value == last_progress:
                 stall_count += 1
                 if stall_count > 30:
-                    logger.warning(f"Progress stalled at {progress_value.value}/{len(tasks)}")
+                    logger.warning(f"Progress stalled at {progress_value.value}/{total_tasks}")
             else:
                 stall_count = 0
                 last_progress = progress_value.value           
@@ -332,7 +464,7 @@ def collect_vllm(num_processes : int):
     except:
         logger.warning("cannot collect VLLM attention test cases, skipping...")
 
-def collect_trtllm(num_processes: int, ops: List[str]=None):
+def collect_trtllm(num_processes: int, ops: List[str]=None, power_limits=None, benchmark_duration=DEFAULT_BENCHMARK_DURATION):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     all_errors = []
     
@@ -461,7 +593,9 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
                 collection['type'],
                 get_func,
                 run_func,
-                num_processes
+                num_processes,
+                power_limits=power_limits,
+                benchmark_duration=benchmark_duration
             )
             all_errors.extend(errors)
             
@@ -526,29 +660,44 @@ def main():
     parser = argparse.ArgumentParser(description='Collect performance data for backends')
     parser.add_argument('--backend', type=str, choices=['trtllm', 'sglang', 'vllm'], default='trtllm')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
-    parser.add_argument('--ops', nargs='*', type=str, choices=['gemm_trt', 'gemm', 'mla_context', 
+    parser.add_argument('--ops', nargs='*', type=str, choices=['gemm_trt', 'gemm', 'mla_context',
                                                                'mla_generation', 'attention_context',
                                                                'attention_generation', 'mla_bmm_gen_pre',
                                                                'mla_bmm_gen_post', 'moe'],
                         help='Run only specified collection items. Leave empty to run all.',
                         default=None)
+    parser.add_argument('--power-limits', type=str, default=None,
+                       help='Comma-separated power limits (W), e.g., "700,600,500,400". Leave empty to disable power profiling.')
+    parser.add_argument('--benchmark-duration', type=float, default=DEFAULT_BENCHMARK_DURATION,
+                       help=f'Target duration for memory-bound benchmarks (seconds). Default: {DEFAULT_BENCHMARK_DURATION}')
     args = parser.parse_args()
     ops = args.ops
-    
+
+    # Parse power limits
+    power_limits = None
+    if args.power_limits:
+        power_limits = [int(x.strip()) for x in args.power_limits.split(',')]
+
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
         logger = setup_logging(scope=args.ops if ops else ['all'], debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
-        
+
+    if power_limits:
+        logger.info(f"Power limits for computation kernels: {power_limits}")
+        logger.info(f"Benchmark duration for memory-bound kernels: {args.benchmark_duration}s")
+    else:
+        logger.info("Power profiling disabled (no --power-limits specified)")
+
     num_processes = torch.cuda.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
-    
+
     mp.set_start_method('spawn')
-    
+
     if args.backend == 'trtllm':
-        collect_trtllm(num_processes, ops)
+        collect_trtllm(num_processes, ops, power_limits, args.benchmark_duration)
     elif args.backend == 'sglang':
         collect_sglang(num_processes)
     elif args.backend == 'vllm':

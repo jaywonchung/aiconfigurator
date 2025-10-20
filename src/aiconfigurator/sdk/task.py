@@ -66,6 +66,12 @@ class TaskContext:
     yaml_patch: dict = field(default_factory=dict)
     yaml_mode: Literal["patch", "replace"] = "patch"
 
+    # Power-related fields
+    power_limits: Optional[list[int]] = None  # For agg mode or general use
+    prefill_power_limits: Optional[list[int]] = None  # For disagg prefill workers
+    decode_power_limits: Optional[list[int]] = None  # For disagg decode workers
+    cluster_power_budget: Optional[float] = None  # Total cluster power budget in W
+
     @property
     def is_moe(self) -> bool:
         return check_is_moe(self.model_name)
@@ -586,6 +592,11 @@ class TaskConfig:
         total_gpus: Optional[int] = None,
         profiles: Optional[list[str]] = None,
         yaml_config: Optional[dict] = None,
+        # Power-related parameters
+        power_limits: Optional[list[int]] = None,
+        prefill_power_limits: Optional[list[int]] = None,
+        decode_power_limits: Optional[list[int]] = None,
+        cluster_power_budget: Optional[float] = None,
     ) -> None:
         yaml_mode = "patch"
         yaml_patch: dict = {}
@@ -623,6 +634,11 @@ class TaskConfig:
             profiles=effective_profiles,
             yaml_patch=yaml_patch,
             yaml_mode=yaml_mode,
+            # Power-related fields
+            power_limits=power_limits,
+            prefill_power_limits=prefill_power_limits,
+            decode_power_limits=decode_power_limits,
+            cluster_power_budget=cluster_power_budget,
         )
 
         self.config, applied_layers = TaskConfigFactory.create(ctx)
@@ -639,6 +655,11 @@ class TaskConfig:
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
         self.profiles = list(effective_profiles)
+        # Power-related fields
+        self.power_limits = power_limits
+        self.prefill_power_limits = prefill_power_limits
+        self.decode_power_limits = decode_power_limits
+        self.cluster_power_budget = cluster_power_budget
 
         if serving_mode == "agg":
             effective_backend_version = self.config.worker_config.backend_version
@@ -831,6 +852,10 @@ class TaskRunner:
             )
             return None
         logger.info("Task %s: Running agg pareto", task_config.task_name)
+        # Get power limits from TaskContext (stored in task_config during initialization)
+        power_limits = getattr(task_config, 'power_limits', None)
+        cluster_power_budget = getattr(task_config, 'cluster_power_budget', None)
+
         result_df = pa.agg_pareto(
             model_name=task_config.model_name,
             runtime_config=runtime_config,
@@ -838,6 +863,8 @@ class TaskRunner:
             backend_name=task_config.worker_config.backend_name,
             model_config=model_config,
             parallel_config_list=parallel_config_list,
+            power_limits=power_limits,
+            cluster_power_budget=cluster_power_budget,
         )
         return {"pareto_df": result_df, "pareto_frontier_df": pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()}
 
@@ -957,6 +984,11 @@ class TaskRunner:
             return None
 
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
+        # Get power limits from TaskContext (stored in task_config during initialization)
+        prefill_power_limits = getattr(task_config, 'prefill_power_limits', None)
+        decode_power_limits = getattr(task_config, 'decode_power_limits', None)
+        cluster_power_budget = getattr(task_config, 'cluster_power_budget', None)
+
         result_df = pa.disagg_pareto(
             model_name=task_config.model_name,
             runtime_config=runtime_config,
@@ -976,6 +1008,9 @@ class TaskRunner:
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
+            prefill_power_limits=prefill_power_limits,
+            decode_power_limits=decode_power_limits,
+            cluster_power_budget=cluster_power_budget,
         )
         return {"pareto_df": result_df, "pareto_frontier_df": pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()}
 

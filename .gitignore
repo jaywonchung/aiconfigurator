@@ -17,6 +17,7 @@ aiconf_save/
 venv/
 env/
 .venv/
+.envrc
 
 *.pyc
 *.pyo

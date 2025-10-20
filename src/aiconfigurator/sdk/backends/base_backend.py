@@ -46,75 +46,141 @@ class BaseBackend(ABC):
                 step, default is 32.
             latency_correction_scale (float): the correction scale to adjust the latency, default is 1.0. corrected latency = latency * latency_correction_scale
         """
-        def _run_context(batch_size: int, isl: int) -> dict[str, float]:
+        def _run_context(batch_size: int, isl: int) -> tuple[dict[str, float], dict[str, float]]:
+            """
+            Run context phase and track both latency and energy.
+
+            Returns:
+                tuple: (context_latency_dict, context_energy_dict)
+                    - context_latency_dict: {op_name: latency_ms}
+                    - context_energy_dict: {op_name: energy_mJ}
+            """
             context_latency_dict = defaultdict(float)
+            context_energy_dict = defaultdict(float)
 
             for op in model.context_ops:
-                #query latency and store the latency
+                #query latency and power, calculate energy
                 x = batch_size*isl if 'logits_gemm' not in op._name else batch_size
-                latency = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl)
+                result = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl)
+
+                # Handle both tuple (latency, power) and single value (latency only) for backward compatibility
+                if isinstance(result, tuple):
+                    latency, power = result
+                else:
+                    latency = result
+                    power = 0.0
+
                 context_latency_dict[op._name] += latency
+                # Energy (mJ) = Time (ms) × Power (W)
+                context_energy_dict[op._name] += latency * power
 
-            return context_latency_dict
+            return context_latency_dict, context_energy_dict
 
-        def _run_generation(batch_size: int, beam_width: int, isl: int, osl: int, stride: int) -> dict[str, float]:
+        def _run_generation(batch_size: int, beam_width: int, isl: int, osl: int, stride: int) -> tuple[dict[str, float], dict[str, float]]:
+            """
+            Run generation phase and track both latency and energy.
+
+            Returns:
+                tuple: (generation_latency_dict, generation_energy_dict)
+                    - generation_latency_dict: {op_name: latency_ms}
+                    - generation_energy_dict: {op_name: energy_mJ}
+            """
             # mtp/speculative decoding correction
             batch_size = batch_size*(model._nextn+1)
 
             latencies = []
+            energies = []
             cached_latency_dict = None
+            cached_energy_dict = None
             for i in range(osl-1):
 
                 if i%stride != 0:
                     latencies.append(copy.deepcopy(cached_latency_dict))
+                    energies.append(copy.deepcopy(cached_energy_dict))
                     continue
 
                 latency_dict = defaultdict(float)
+                energy_dict = defaultdict(float)
                 for op in model.generation_ops:
-                    latency = op.query(database, x=batch_size*beam_width, batch_size=batch_size, beam_width=beam_width, s=isl+i+1)
+                    result = op.query(database, x=batch_size*beam_width, batch_size=batch_size, beam_width=beam_width, s=isl+i+1)
+
+                    # Handle both tuple (latency, power) and single value (latency only) for backward compatibility
+                    if isinstance(result, tuple):
+                        latency, power = result
+                    else:
+                        latency = result
+                        power = 0.0
+
                     latency_dict[op._name] += latency
+                    # Energy (mJ) = Time (ms) × Power (W)
+                    energy_dict[op._name] += latency * power
+
                 cached_latency_dict = latency_dict
+                cached_energy_dict = energy_dict
 
                 latencies.append(latency_dict)
-        
+                energies.append(energy_dict)
+
             generation_latency_dict = {}
+            generation_energy_dict = {}
             if len(latencies) > 0:
                 for key in latencies[0].keys():
                     generation_latency_dict[key] = 0.0
-                    for latency_dict in latencies:
+                    generation_energy_dict[key] = 0.0
+                    for latency_dict, energy_dict in zip(latencies, energies):
                         generation_latency_dict[key] += latency_dict[key]
-            
-            return generation_latency_dict
+                        generation_energy_dict[key] += energy_dict[key]
+
+            return generation_latency_dict, generation_energy_dict
 
         summary = InferenceSummary(runtime_config)
         batch_size, beam_width, isl, osl = runtime_config.batch_size, runtime_config.beam_width, runtime_config.isl, runtime_config.osl
-        
+
         context_latency_dict, generation_latency_dict = {}, {}
+        context_energy_dict, generation_energy_dict = {}, {}
         if mode == 'static_ctx':
-            context_latency_dict = _run_context(batch_size, isl)
+            context_latency_dict, context_energy_dict = _run_context(batch_size, isl)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1)
         elif mode == 'static_gen':
-            generation_latency_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
+            generation_latency_dict, generation_energy_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl, num_tokens=batch_size*beam_width) # for gen only, all kvcache is needed.
-        else:   
-            context_latency_dict = _run_context(batch_size, isl)
-            generation_latency_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
+        else:
+            context_latency_dict, context_energy_dict = _run_context(batch_size, isl)
+            generation_latency_dict, generation_energy_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
 
         if latency_correction_scale != 1.0:
             logger.debug(f'latency_correction_scale: {latency_correction_scale} is applied to the latency')
             for op, op_latency in context_latency_dict.items():
                 context_latency_dict[op] *= latency_correction_scale
+                # Scale energy proportionally with latency
+                if op in context_energy_dict:
+                    context_energy_dict[op] *= latency_correction_scale
             for op, op_latency in generation_latency_dict.items():
                 generation_latency_dict[op] *= latency_correction_scale
+                # Scale energy proportionally with latency
+                if op in generation_energy_dict:
+                    generation_energy_dict[op] *= latency_correction_scale
 
+        # Calculate total latency and energy
         context_latency, generation_latency = 0.0, 0.0
+        context_energy, generation_energy = 0.0, 0.0
         for op, op_latency in context_latency_dict.items():
             context_latency += op_latency
+        for op, op_energy in context_energy_dict.items():
+            context_energy += op_energy
         for op, op_latency in generation_latency_dict.items():
             generation_latency += op_latency
+        for op, op_energy in generation_energy_dict.items():
+            generation_energy += op_energy
 
-        bs = batch_size        
+        # Calculate total energy and time-weighted average power
+        total_energy = context_energy + generation_energy  # mJ
+        total_latency = context_latency + generation_latency  # ms
+        # Average power (W) = Total energy (mJ) / Total time (ms)
+        avg_power = total_energy / total_latency if total_latency > 0 else 0.0
+
+        bs = batch_size
         global_bs = bs * model.config.attention_dp_size
         concurrency = global_bs
         latency = context_latency + generation_latency
@@ -141,11 +207,16 @@ class BaseBackend(ABC):
         moe = model.config.moe_quant_mode.name
         comm = model.config.comm_quant_mode.name
         mem = memory['total']
-        
-        
+
+        # Power-related columns
+        power_limit = model.config.power_limit if model.config.power_limit is not None else 0
+        power = avg_power
+        total_cluster_power = avg_power * num_total_gpus
+
         data = [[model.model_name, isl, osl, \
                  concurrency, request_rate, bs, global_bs, \
                  ttft, tpot, seq_s, seq_s_gpu, tokens_s, tokens_s_gpu, tokens_s_user, latency, context_latency, generation_latency, \
+                 power_limit, power, total_cluster_power, \
                  num_total_gpus, \
                  tp, pp, dp, moe_tp, moe_ep, parallel, \
                  gemm, kvcache, fmha, moe, comm, \
@@ -156,6 +227,9 @@ class BaseBackend(ABC):
 
         summary.set_context_latency_dict(context_latency_dict)
         summary.set_generation_latency_dict(generation_latency_dict)
+        summary.set_context_energy_dict(context_energy_dict)
+        summary.set_generation_energy_dict(generation_energy_dict)
+        summary.set_avg_power(avg_power)
         summary.set_memory_and_check_oom(memory, database.system_spec['gpu']['mem_capacity'])
         summary.set_summary_df(summary_df)
 

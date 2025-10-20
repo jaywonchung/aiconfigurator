@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Optional, Union
 from aiconfigurator.sdk import common
 
 @dataclass
@@ -27,6 +27,7 @@ class ModelConfig:
     sms: int = 20
     moe_backend: str = 'deepep_moe'
     attention_backend: str = 'flashinfer' # 'flashinfer' or 'fa3'
+    power_limit: Optional[int] = None  # GPU power limit in Watts
 
 @dataclass
 class RuntimeConfig:

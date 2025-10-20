@@ -271,17 +271,23 @@ def load_nccl_data(nccl_file):
 
 def load_gemm_data(gemm_file):
     """
-    Load the gemm data
+    Load the gemm data with power_limit as dimension.
+    Schema: gemm_data[quant_mode][power_limit][m][n][k] = (latency, power)
     """
     if not os.path.exists(gemm_file):
         logger.warning(f"GEMM data file {gemm_file} not found.")
         return None
-    gemm_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))
+
+    # 5-level nesting: [quant_mode][power_limit][m][n][k]
+    gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
 
     with open(gemm_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
+
+    has_power_limit = 'power_limit' in headers
+    has_power = 'power' in headers
 
     for row in rows:
         quant_mode, m, n, k, latency = row['gemm_dtype'], row['m'], row['n'], row['k'], row['latency']
@@ -292,12 +298,24 @@ def load_gemm_data(gemm_file):
 
         quant_mode = common.GEMMQuantMode[quant_mode]
 
+        # Handle power limit (default to 700 for backward compatibility)
+        if has_power_limit:
+            power_limit = int(row['power_limit'])
+        else:
+            power_limit = 700
+
+        # Handle power (default to 0.0 for backward compatibility)
+        if has_power:
+            power = float(row['power'])
+        else:
+            power = 0.0
+
         try:
-            latency = gemm_data[quant_mode][m][n][k]
-            logger.debug('value conflict in gemm data: {} {} {} {} {}'.format(quant_mode, m, n, k, latency))
+            existing = gemm_data[quant_mode][power_limit][m][n][k]
+            logger.debug('value conflict in gemm data: {} {}W {} {} {} {}'.format(quant_mode, power_limit, m, n, k, latency))
         except KeyError:
-            gemm_data[quant_mode][m][n][k] = latency
-    
+            gemm_data[quant_mode][power_limit][m][n][k] = (latency, power)
+
     return gemm_data
 
 def load_moe_data(moe_file):
@@ -461,16 +479,23 @@ def load_sglang_moe_data(moe_file):
 
 def load_context_attention_data(context_attention_file):
     """
-    Load the context attention data
+    Load the context attention data with power_limit as dimension.
+    Schema: [quant_mode][kv_cache_dtype][power_limit][kv_n][head_size][window_size][n][s][b] = (latency, power)
     """
     if not os.path.exists(context_attention_file):
         logger.warning(f"Context attention data file {context_attention_file} not found.")
         return None
-    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))))
+
+    # 9-level nesting with power_limit added
+    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))))))
+
     with open(context_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
+
+    has_power_limit = 'power_limit' in headers
+    has_power = 'power' in headers
 
     for row in rows:
         try:
@@ -486,7 +511,19 @@ def load_context_attention_data(context_attention_file):
         head_size=int(head_size)
         window_size=int(window_size)
         latency=float(latency)
-        
+
+        # Handle power limit (default to 700 for backward compatibility)
+        if has_power_limit:
+            power_limit = int(row['power_limit'])
+        else:
+            power_limit = 700
+
+        # Handle power (default to 0.0 for backward compatibility)
+        if has_power:
+            power = float(row['power'])
+        else:
+            power = 0.0
+
         # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
         kv_n = 0 if n == kv_n else kv_n
 
@@ -494,25 +531,32 @@ def load_context_attention_data(context_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
-            logger.debug('value conflict in context attention data: {} {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, head_size, window_size, kv_n, n, s, b))
+            existing = context_attention_data[quant_mode][kv_cache_dtype][power_limit][kv_n][head_size][window_size][n][s][b]
+            logger.debug('value conflict in context attention data: {} {} {}W {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, power_limit, head_size, window_size, kv_n, n, s, b))
         except KeyError:
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = latency
-    
+            context_attention_data[quant_mode][kv_cache_dtype][power_limit][kv_n][head_size][window_size][n][s][b] = (latency, power)
+
     return context_attention_data
 
 def load_generation_attention_data(generation_attention_file):
     """
-    Load the generation attention data
+    Load the generation attention data with power_limit as dimension.
+    Schema: [kv_cache_dtype][power_limit][kv_n][head_size][window_size][n][b][s] = (latency, power)
     """
     if not os.path.exists(generation_attention_file):
         logger.warning(f"Generation attention data file {generation_attention_file} not found.")
         return None
-    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))))
+
+    # 8-level nesting with power_limit added
+    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))))
+
     with open(generation_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
+
+    has_power_limit = 'power_limit' in headers
+    has_power = 'power' in headers
 
     for row in rows:
         try:
@@ -530,6 +574,18 @@ def load_generation_attention_data(generation_attention_file):
         step = int(step)
         latency=float(latency)
 
+        # Handle power limit (default to 700 for backward compatibility)
+        if has_power_limit:
+            power_limit = int(row['power_limit'])
+        else:
+            power_limit = 700
+
+        # Handle power (default to 0.0 for backward compatibility)
+        if has_power:
+            power = float(row['power'])
+        else:
+            power = 0.0
+
         # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
         kv_n = 0 if n == kv_n else kv_n
         s = s + step
@@ -537,11 +593,11 @@ def load_generation_attention_data(generation_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
-            logger.debug('value conflict in generation attention data: {} {} {} {} {} {}'.format(kv_cache_dtype, kv_n, head_size, window_size, n, b, s))
+            existing = generation_attention_data[kv_cache_dtype][power_limit][kv_n][head_size][window_size][n][b][s]
+            logger.debug('value conflict in generation attention data: {} {}W {} {} {} {} {}'.format(kv_cache_dtype, power_limit, kv_n, head_size, window_size, n, b, s))
         except KeyError:
-            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = latency
-        
+            generation_attention_data[kv_cache_dtype][power_limit][kv_n][head_size][window_size][n][b][s] = (latency, power)
+
     return generation_attention_data
 
 def load_context_mla_data(context_mla_file):
@@ -1287,14 +1343,21 @@ class PerfDatabase(object):
         """
         return self._default_sol_mode
     
-    def query_gemm(self, 
-                   m : int, 
-                   n : int, 
-                   k : int, 
-                   quant_mode : common.GEMMQuantMode, 
-                   sol_mode : Optional[common.SOLMode] = None) -> float:
+    def query_gemm(self,
+                   m : int,
+                   n : int,
+                   k : int,
+                   quant_mode : common.GEMMQuantMode,
+                   sol_mode : Optional[common.SOLMode] = None,
+                   power_limit : Optional[int] = None) -> float:
         """
         Query the gemm data
+
+        Args:
+            power_limit: GPU power limit in Watts (optional). If None, uses max available power limit.
+
+        Returns:
+            latency_ms (float) or tuple (latency_ms, power_watts) if power data is available
         """
         def get_sol(m : int, n : int, k : int, quant_mode : common.GEMMQuantMode) -> Tuple[float, float, float]:
             """
@@ -1304,7 +1367,7 @@ class PerfDatabase(object):
             sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
-        
+
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
@@ -1312,21 +1375,38 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(m, n, k, quant_mode)
         else:
-            result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], 'cubic')
-            return result
+            # Handle power_limit dimension
+            if power_limit is None:
+                # Use max available power limit
+                available_limits = list(self._gemm_data[quant_mode].keys())
+                if available_limits:
+                    power_limit = max(available_limits)
+                else:
+                    power_limit = 700  # Default fallback
+
+            try:
+                result = self._interp_3d(m, n, k, self._gemm_data[quant_mode][power_limit], 'cubic')
+                return result
+            except KeyError:
+                logger.warning(f"GEMM data not found for power_limit={power_limit}W, quant_mode={quant_mode}")
+                return 0.0
     
-    def query_context_attention(self, 
-                                b : int, 
-                                s : int, 
-                                n : int, 
-                                n_kv : int, 
-                                kvcache_quant_mode : common.KVCacheQuantMode, 
-                                fmha_quant_mode : common.FMHAQuantMode, 
+    def query_context_attention(self,
+                                b : int,
+                                s : int,
+                                n : int,
+                                n_kv : int,
+                                kvcache_quant_mode : common.KVCacheQuantMode,
+                                fmha_quant_mode : common.FMHAQuantMode,
                                 sol_mode : Optional[common.SOLMode] = None,
                                 window_size : int = 0,
-                                head_size : int = 128) -> float:
+                                head_size : int = 128,
+                                power_limit : Optional[int] = None) -> float:
         """
         Query the context attention data
+
+        Args:
+            power_limit: GPU power limit in Watts (optional). If None, uses max available power limit.
         """
         def get_sol(b : int, s : int, n : int, n_kv : int, h : int, w : int,
                     kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode,) -> Tuple[float, float, float]:
@@ -1359,24 +1439,42 @@ class PerfDatabase(object):
         else:
             if head_size not in [64,128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            if n_kv == n:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0][head_size][window_size]
-            else:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][window_size]
-            latency = self._interp_3d(n, s, b, attention_dict, 'cubic')
-            return latency
+
+            # Handle power_limit dimension
+            if power_limit is None:
+                # Use max available power limit
+                available_limits = list(self._context_attention_data[fmha_quant_mode][kvcache_quant_mode].keys())
+                if available_limits:
+                    power_limit = max(available_limits)
+                else:
+                    power_limit = 700  # Default fallback
+
+            try:
+                if n_kv == n:
+                    attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][power_limit][0][head_size][window_size]
+                else:
+                    attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][power_limit][n_kv][head_size][window_size]
+                latency = self._interp_3d(n, s, b, attention_dict, 'cubic')
+                return latency
+            except KeyError:
+                logger.warning(f"Context attention data not found for power_limit={power_limit}W")
+                return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
     
-    def query_generation_attention(self, 
-                                   b : int, 
-                                   s : int, 
-                                   n : int, 
-                                   n_kv : int, 
-                                   kvcache_quant_mode : common.KVCacheQuantMode, 
+    def query_generation_attention(self,
+                                   b : int,
+                                   s : int,
+                                   n : int,
+                                   n_kv : int,
+                                   kvcache_quant_mode : common.KVCacheQuantMode,
                                    sol_mode : Optional[common.SOLMode] = None,
                                    window_size : int = 0,
-                                   head_size : int = 128) -> float:
+                                   head_size : int = 128,
+                                   power_limit : Optional[int] = None) -> float:
         """
         Query the generation attention data
+
+        Args:
+            power_limit: GPU power limit in Watts (optional). If None, uses max available power limit.
         """
         def get_sol(b : int, s : int, n : int, n_kv : int, h : int, w : int, kvcache_quant_mode : common.KVCacheQuantMode) -> Tuple[float, float, float]:
             """
@@ -1385,7 +1483,7 @@ class PerfDatabase(object):
             if w > 0:
                 kv_len = min(s - 1, w)
             else:
-                kv_len = s - 1           
+                kv_len = s - 1
             # only consider fp16 mmha
             ops = 2 * b * n * h * 2 * (kv_len)   # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
@@ -1394,7 +1492,7 @@ class PerfDatabase(object):
                 2*n_kv*(kv_len)*h*kvcache_quant_mode.value.memory + # K, V cache read
                 n*h*2                                # Output write, assuming 16bits
                 )
-            
+
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -1411,10 +1509,22 @@ class PerfDatabase(object):
             if head_size not in [64,128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
             else:
-                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
+                # Handle power_limit dimension
+                if power_limit is None:
+                    # Use max available power limit
+                    available_limits = list(self._generation_attention_data[kvcache_quant_mode].keys())
+                    if available_limits:
+                        power_limit = max(available_limits)
+                    else:
+                        power_limit = 700  # Default fallback
 
-            latency =  self._interp_3d(n, b, s, attention_dict, 'bilinear')
-            return latency
+                try:
+                    attention_dict = self._generation_attention_data[kvcache_quant_mode][power_limit][n_kv][head_size][window_size]
+                    latency = self._interp_3d(n, b, s, attention_dict, 'bilinear')
+                    return latency
+                except KeyError:
+                    logger.warning(f"Generation attention data not found for power_limit={power_limit}W")
+                    return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
 
     def query_context_mla(self, 
                           b : int, 

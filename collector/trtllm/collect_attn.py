@@ -14,7 +14,15 @@ from tensorrt_llm._torch.pyexecutor.resource_manager import KVCacheManager
 from tensorrt_llm._torch.metadata import KVCacheParams
 from tensorrt_llm.llmapi import KvCacheConfig
 import os
-from helper import getSMVersion, log_perf
+import time
+from helper import (
+    getSMVersion,
+    log_perf,
+    is_context_attention_compute_bound,
+    is_generation_attention_compute_bound,
+    measure_memory_bound_kernel_power,
+    get_compute_bound_power
+)
 
 def run_attention_torch(batch_size,
                         input_len,
@@ -24,12 +32,27 @@ def run_attention_torch(batch_size,
                         attention_window_size,
                         use_fp8_kv_cache,
                         use_fp8_context_fmha,
-                        is_context_phase,                        
+                        is_context_phase,
                         perf_filename,
-                        device='cuda:0'):
+                        device='cuda:0',
+                        zeus_monitor=None,
+                        power_limit=None,
+                        benchmark_duration=3.0):
+    """
+    Run attention benchmark with optional energy profiling.
+
+    Args:
+        Additional args for power profiling:
+        zeus_monitor: ZeusMonitor instance (optional)
+        power_limit: GPU power limit in Watts (optional)
+        benchmark_duration: Target duration for memory-bound benchmarks
+    """
     device=torch.device(device)
+    device_id = device.index
     torch.set_default_device(device)
     torch.cuda.set_device(device)
+
+    device_name = torch.cuda.get_device_name(device)
 
     # if XQA JIT is enabled, the context phase will also trigger XQA prepare which causes the error with specifc q/kv head and seq setting.
     if is_context_phase:
@@ -185,15 +208,67 @@ def run_attention_torch(batch_size,
     # warmup
     for i in range(warming_up):
         g.replay()
-    
+    torch.cuda.synchronize()
+
+    # Warmup latency measurement
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
-    for i in range(test_ite):
-        g.replay()
+    g.replay()
     end_event.record()
     torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event)/test_ite
+    warmup_latency = start_event.elapsed_time(end_event)
+
+    # Determine dtype strings for compute-bound check
+    kv_cache_dtype_str = 'fp8' if use_fp8_kv_cache else 'float16'
+    dtype_str = 'fp8' if use_fp8_context_fmha else 'float16'
+
+    # Determine if compute-bound
+    if is_context_phase:
+        compute_bound = is_context_attention_compute_bound(
+            batch_size, input_len, head_dim, dtype_str, kv_cache_dtype_str, device_name
+        )
+    else:
+        compute_bound = is_generation_attention_compute_bound()
+
+    # Energy/power measurement
+    if power_limit is not None and zeus_monitor is not None:
+        if compute_bound:
+            # Compute-bound: power = power_limit, use warmup latency
+            latency = warmup_latency
+            power = get_compute_bound_power(power_limit)
+            benchmark_start_time = None
+            benchmark_end_time = None
+        else:
+            # Memory-bound: measure power over target duration
+            def warmup_fn():
+                for _ in range(warming_up):
+                    g.replay()
+
+            def benchmark_fn():
+                g.replay()
+
+            latency, power, benchmark_start_time, benchmark_end_time = \
+                measure_memory_bound_kernel_power(
+                    zeus_monitor,
+                    warmup_fn,
+                    benchmark_fn,
+                    warmup_latency,
+                    target_duration_sec=benchmark_duration
+                )
+    else:
+        # No power limit specified - legacy mode
+        start_event.record()
+        for i in range(test_ite):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        latency = start_event.elapsed_time(end_event) / test_ite
+        power = None
+        power_limit = None
+        compute_bound = None
+        benchmark_start_time = None
+        benchmark_end_time = None
     
     # write result
     if is_context_phase:
@@ -204,33 +279,39 @@ def run_attention_torch(batch_size,
         isl = 1
         step = input_len
         op_name = 'generation_attention'
-    kv_cache_dtype_str = 'float16'
-    if use_fp8_kv_cache:
-        kv_cache_dtype_str = 'fp8'
-    if use_fp8_context_fmha:
-        dtype_str = 'fp8'
-    else:
-        dtype_str = 'float16'
 
-    log_perf(item_list=[{ 
-                    'batch_size': batch_size,
-                    'isl': isl,
-                    'num_heads': num_heads,
-                    'num_key_value_heads': num_key_value_heads,
-                    'head_dim': head_dim,
-                    'window_size': attention_window_size,
-                    'beam_width': 1,
-                    'attn_dtype': dtype_str,
-                    'kv_cache_dtype': kv_cache_dtype_str,                     
-                    'step': step, 
-                    'latency': latency
-                    }], 
-            framework='TRTLLM', 
-            version=tensorrt_llm.__version__, 
-            device_name=torch.cuda.get_device_name(device), 
-            op_name=op_name, 
-            kernel_source='torch_flow', 
-            perf_filename=perf_filename)
+    # Build result item
+    item = {
+        'batch_size': batch_size,
+        'isl': isl,
+        'num_heads': num_heads,
+        'num_key_value_heads': num_key_value_heads,
+        'head_dim': head_dim,
+        'window_size': attention_window_size,
+        'beam_width': 1,
+        'attn_dtype': dtype_str,
+        'kv_cache_dtype': kv_cache_dtype_str,
+        'step': step,
+        'latency': latency
+    }
+
+    if power is not None:
+        item['power_limit'] = power_limit
+        item['power'] = power
+        item['compute_bound'] = int(compute_bound)
+        if benchmark_start_time is not None:
+            item['benchmark_start_time'] = benchmark_start_time
+            item['benchmark_end_time'] = benchmark_end_time
+
+    log_perf(
+        item_list=[item],
+        framework='TRTLLM',
+        version=tensorrt_llm.__version__,
+        device_name=device_name,
+        op_name=op_name,
+        kernel_source='torch_flow',
+        perf_filename=perf_filename
+    )
     kv_cache_manager.shutdown()
 
 

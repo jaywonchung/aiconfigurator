@@ -49,6 +49,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--ttft", type=float, default=1000.0, help="Time to first token in ms.")
     parser.add_argument("--tpot", type=float, default=20.0, help="Time per output token in ms.")
 
+    # Power-related arguments
+    parser.add_argument("--power-limits", type=str, default=None, help='Power limits to explore (W). Comma-separated list (e.g., "400,500,600,700") or single value. Defaults to max available power limit if not specified.')
+    parser.add_argument("--prefill-power-limits", type=str, default=None, help='Power limits for prefill workers in disaggregated mode (W). Comma-separated list.')
+    parser.add_argument("--decode-power-limits", type=str, default=None, help='Power limits for decode workers in disaggregated mode (W). Comma-separated list.')
+    parser.add_argument("--power-budget", type=float, default=None, help='Total cluster power budget in Watts. Used to filter/highlight configurations in visualization.')
+
 
 def _add_experiments_mode_arguments(parser):
     parser.add_argument("--yaml_path", type=str, required=True, help="Path to a YAML file containing experiment definitions.")
@@ -80,6 +86,24 @@ def configure_parser(parser):
 
 def _build_default_task_configs(args) -> Dict[str, TaskConfig]:
     decode_system = args.decode_system or args.system
+
+    # Parse power limits from comma-separated strings to lists
+    power_limits = None
+    if hasattr(args, 'power_limits') and args.power_limits:
+        power_limits = [int(x.strip()) for x in args.power_limits.split(',')]
+
+    prefill_power_limits = None
+    if hasattr(args, 'prefill_power_limits') and args.prefill_power_limits:
+        prefill_power_limits = [int(x.strip()) for x in args.prefill_power_limits.split(',')]
+
+    decode_power_limits = None
+    if hasattr(args, 'decode_power_limits') and args.decode_power_limits:
+        decode_power_limits = [int(x.strip()) for x in args.decode_power_limits.split(',')]
+
+    cluster_power_budget = None
+    if hasattr(args, 'power_budget') and args.power_budget:
+        cluster_power_budget = args.power_budget
+
     common_kwargs: Dict[str, Any] = {
         "model_name": args.model,
         "system_name": args.system,
@@ -90,12 +114,19 @@ def _build_default_task_configs(args) -> Dict[str, TaskConfig]:
         "osl": args.osl,
         "ttft": args.ttft,
         "tpot": args.tpot,
+        "cluster_power_budget": cluster_power_budget,
     }
 
-    agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
+    # Agg mode uses power_limits
+    agg_kwargs = dict(common_kwargs)
+    agg_kwargs["power_limits"] = power_limits
+    agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
 
+    # Disagg mode uses prefill_power_limits and decode_power_limits
     disagg_kwargs = dict(common_kwargs)
     disagg_kwargs["decode_system_name"] = decode_system
+    disagg_kwargs["prefill_power_limits"] = prefill_power_limits
+    disagg_kwargs["decode_power_limits"] = decode_power_limits
     disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
 
     return {"disagg": disagg_task, "agg": agg_task}

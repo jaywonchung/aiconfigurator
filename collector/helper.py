@@ -9,12 +9,19 @@ import signal
 import sys
 import traceback
 import multiprocessing as mp 
+import importlib.resources as pkg_resources
+import time
+
 try:
     from cuda import cuda
 except:
     pass
 from datetime import datetime
 from pathlib import Path
+
+import yaml
+import torch
+from zeus.device import get_gpus
 
 def setup_signal_handlers(worker_id, error_queue=None):
     """Setup signal handlers to log crashes"""
@@ -265,3 +272,208 @@ def log_perf(item_list: list[dict],
             f.write(header_prefix + '\n')
 
         f.write(content_prefix + '\n')
+
+# Dtype size mapping for power profiling
+DTYPE_SIZES = {
+    'float16': 2,
+    'fp16': 2,
+    'bfloat16': 2,
+    'bf16': 2,
+    'fp8': 1,
+    'fp8_block': 1,
+    'int8': 1,
+    'int4': 0.5,
+}
+
+def get_dtype_size(dtype: str) -> float:
+    """Get size in bytes for a dtype"""
+    dtype_lower = dtype.lower()
+    if dtype_lower not in DTYPE_SIZES:
+        raise ValueError(f"Unknown dtype: {dtype}")
+    return DTYPE_SIZES[dtype_lower]
+
+def get_gpu_specs_from_device(device_name: str) -> dict:
+    """
+    Load GPU specifications from system YAML files.
+
+    Args:
+        device_name: GPU device name (e.g., "NVIDIA H100")
+
+    Returns:
+        dict with keys: float16_tflops, fp8_tflops, mem_bw_gbs, power_max
+    """
+    # Map device name to system file
+    device_upper = device_name.upper()
+    if 'H100' in device_upper:
+        system_file = 'h100_sxm.yaml'
+    elif 'H200' in device_upper:
+        system_file = 'h200_sxm.yaml'
+    elif 'A100' in device_upper:
+        system_file = 'a100_sxm.yaml'
+    elif 'B200' in device_upper:
+        system_file = 'b200_sxm.yaml'
+    elif 'GB200' in device_upper:
+        system_file = 'gb200_sxm.yaml'
+    else:
+        raise ValueError(f"Unsupported GPU: {device_name}")
+
+    # Load system YAML
+    systems_dir = pkg_resources.files('aiconfigurator') / 'systems'
+    yaml_path = systems_dir / system_file
+
+    with open(yaml_path) as f:
+        system_spec = yaml.safe_load(f)
+
+    gpu = system_spec['gpu']
+
+    return {
+        'float16_tflops': gpu['float16_tc_flops'] / 1e12,  # Convert to TFLOPS
+        'fp8_tflops': gpu.get('fp8_tc_flops', gpu['float16_tc_flops']) / 1e12,
+        'mem_bw_gbs': gpu['mem_bw'] / 1e9,  # Convert to GB/s
+        'power_max': gpu['power'],  # Watts
+    }
+
+def is_gemm_compute_bound(m, n, k, dtype, device_name):
+    """
+    Determine if a GEMM operation is compute-bound.
+
+    Args:
+        m, n, k: GEMM dimensions (C = A @ B, A is m×k, B is k×n)
+        dtype: Data type (e.g., 'float16', 'fp8')
+        device_name: GPU device name
+
+    Returns:
+        True if compute-bound, False if memory-bound
+    """
+    gpu_specs = get_gpu_specs_from_device(device_name)
+    dtype_size = get_dtype_size(dtype)
+
+    # Hardware intensity (FLOPs per byte)
+    if 'fp8' in dtype.lower():
+        hardware_tflops = gpu_specs['fp8_tflops']
+    else:
+        hardware_tflops = gpu_specs['float16_tflops']
+
+    hardware_intensity = (hardware_tflops * 1e12) / (gpu_specs['mem_bw_gbs'] * 1e9)
+
+    # GEMM arithmetic intensity
+    total_flops = 2 * m * n * k
+    memory_bytes = dtype_size * (m * k + k * n + m * n)
+    arithmetic_intensity = total_flops / memory_bytes
+
+    # Compute-bound if arithmetic intensity > hardware intensity
+    return arithmetic_intensity > hardware_intensity
+
+
+def is_context_attention_compute_bound(b, s, d, dtype, kv_cache_dtype, device_name):
+    """
+    Determine if context (prefill) attention is compute-bound.
+
+    Args:
+        b: Batch size
+        s: Sequence length (input)
+        d: Head dimension
+        dtype: Activation dtype
+        kv_cache_dtype: KV cache dtype
+        device_name: GPU device name
+
+    Returns:
+        True if compute-bound, False if memory-bound
+    """
+    gpu_specs = get_gpu_specs_from_device(device_name)
+    dtype_size = get_dtype_size(dtype)
+    kv_dtype_size = get_dtype_size(kv_cache_dtype)
+
+    # Hardware intensity
+    if 'fp8' in dtype.lower():
+        hardware_tflops = gpu_specs['fp8_tflops']
+    else:
+        hardware_tflops = gpu_specs['float16_tflops']
+
+    hardware_intensity = (hardware_tflops * 1e12) / (gpu_specs['mem_bw_gbs'] * 1e9)
+
+    # Attention FLOPs: 4 * b * s * s * d (approximate)
+    total_flops = 4 * b * s * s * d
+
+    # Memory movement
+    memory_bytes = (
+        dtype_size * b * s * d +           # Q read
+        kv_dtype_size * 2 * b * s * d +    # K, V read
+        dtype_size * b * s * d             # Output write
+    )
+
+    arithmetic_intensity = total_flops / memory_bytes
+
+    return arithmetic_intensity > hardware_intensity
+
+
+def is_generation_attention_compute_bound():
+    """Generation (decode) attention is ALWAYS memory-bound"""
+    return False
+
+def set_gpu_power_limit(gpu_index: int, power_limit_watts: int) -> None:
+    """Set GPU power limit using Zeus"""
+    get_gpus().setPowerManagementLimit(gpu_index, power_limit_watts * 1000)  # Convert to mW
+
+
+def measure_memory_bound_kernel_power(
+    zeus_monitor,
+    warmup_fn,
+    benchmark_fn,
+    estimated_latency_ms,
+    target_duration_sec=3.0
+):
+    """
+    Measure power for a memory-bound kernel by running for target_duration.
+
+    Args:
+        zeus_monitor: ZeusMonitor instance
+        warmup_fn: Function to run for warmup
+        benchmark_fn: Function to run for benchmarking (single iteration)
+        estimated_latency_ms: Estimated latency from warmup (milliseconds)
+        target_duration_sec: Target duration for measurement (seconds)
+
+    Returns:
+        (latency_ms, power_watts, benchmark_start_time, benchmark_end_time)
+    """
+    # Warmup
+    warmup_fn()
+    torch.cuda.synchronize()
+
+    # Calculate iterations needed for target duration
+    estimated_duration_per_iter = estimated_latency_ms / 1000  # seconds
+    target_iterations = max(1, int(target_duration_sec / estimated_duration_per_iter))
+
+    # Measure energy
+    zeus_monitor.begin_window("kernel_benchmark", sync_execution=False)
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    benchmark_start_time = time.time()
+
+    start_event.record()
+    for _ in range(target_iterations):
+        benchmark_fn()
+    end_event.record()
+    torch.cuda.synchronize()
+
+    benchmark_end_time = time.time()
+
+    measurement = zeus_monitor.end_window("kernel_benchmark", sync_execution=False)
+
+    # Calculate metrics
+    total_time_ms = start_event.elapsed_time(end_event)
+    avg_latency_ms = total_time_ms / target_iterations
+
+    total_energy_j = measurement.total_energy
+    avg_power_watts = total_energy_j / (total_time_ms / 1000)  # J / seconds
+
+    return avg_latency_ms, avg_power_watts, benchmark_start_time, benchmark_end_time
+
+
+def get_compute_bound_power(power_limit_watts):
+    """
+    For compute-bound kernels, power equals the power limit.
+    """
+    return float(power_limit_watts)

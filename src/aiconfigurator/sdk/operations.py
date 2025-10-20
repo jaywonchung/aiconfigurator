@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Optional, Tuple
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
@@ -8,10 +9,17 @@ class Operation(object):
     """
     Base operation class.
     """
-    def __init__(self, name: str, scale_factor: float) -> None:
+    def __init__(self, name: str, scale_factor: float, power_limit: Optional[int] = None) -> None:
         self._name = name
         self._scale_factor = scale_factor
-    def query(self, database:PerfDatabase, **kwargs):
+        self._power_limit = power_limit
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
+        """
+        Query database for operation performance.
+
+        Returns:
+            Tuple[float, float]: (latency_ms, power_watts)
+        """
         raise NotImplementedError
     def get_weights(self, **kwargs):
         raise NotImplementedError
@@ -20,19 +28,24 @@ class AllReduce(Operation):
     """
     AllReduce operation. Now it's mapped to only trtllm custom allreduce.
     """
-    def __init__(self, name: str, scale_factor: float, h: int, tp_size: int) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self, name: str, scale_factor: float, h: int, tp_size: int, power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._h = h
         self._tp_size = tp_size
         self._weights = 0.0
-        
-    def query(self, database:PerfDatabase, **kwargs):
+
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         if self._tp_size == 1:
-            return 0.0
+            return (0.0, 0.0)
         # count, not size in bytes
         size = kwargs.get('x') * self._h
 
-        return database.query_allreduce(common.CommQuantMode.half, self._tp_size, size)*self._scale_factor
+        latency = database.query_allreduce(common.CommQuantMode.half, self._tp_size, size) * self._scale_factor
+
+        # Communication operations use a default power draw of 70W regardless of power limit
+        power = 70.0
+
+        return (latency, power)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -41,23 +54,28 @@ class P2P(Operation):
     """
     P2P operation.
     """
-    def __init__(self, name: str, scale_factor: float, h: int, pp_size: int) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self, name: str, scale_factor: float, h: int, pp_size: int, power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._h = h
         self._pp_size = pp_size
         self._bytes_per_element = 2
         #self._empirical_scaling_factor = 1.1
         self._weights = 0.0
-  
-    def query(self, database:PerfDatabase, **kwargs):
+
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         if self._pp_size == 1:
-            return 0.0
+            return (0.0, 0.0)
 
         size = kwargs.get('x') * self._h
         p2p_bytes = size * 2
 
-        return database.query_p2p(p2p_bytes) * self._scale_factor
-   
+        latency = database.query_p2p(p2p_bytes)
+
+        # Communication operations use a default power draw of 70W regardless of power limit
+        power = 70.0
+
+        return (latency * self._scale_factor, power)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -65,19 +83,24 @@ class NCCL(Operation):
     """
     NCCL operation.
     """
-    def __init__(self, name: str, scale_factor: float, nccl_op: str, num_elements_per_token: int, num_gpus: int, comm_quant_mode: common.CommQuantMode) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self, name: str, scale_factor: float, nccl_op: str, num_elements_per_token: int, num_gpus: int, comm_quant_mode: common.CommQuantMode, power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._nccl_op = nccl_op
         self._num_elements_per_token = num_elements_per_token
         self._num_gpus = num_gpus
         self._comm_quant_mode = comm_quant_mode
         self._weights = 0.0
-  
-    def query(self, database:PerfDatabase, **kwargs):
+
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         message_size = kwargs.get('x') * self._num_elements_per_token
 
-        return database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size) * self._scale_factor
-   
+        latency = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
+
+        # Communication operations use a default power draw of 70W regardless of power limit
+        power = 70.0
+
+        return (latency * self._scale_factor, power)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -85,19 +108,30 @@ class GEMM(Operation):
     """
     GEMM operation.
     """
-    def __init__(self, name: str, scale_factor: float, n: int, k: int, quant_mode: common.GEMMQuantMode) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self, name: str, scale_factor: float, n: int, k: int, quant_mode: common.GEMMQuantMode, power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._n = n
         self._k = k
         self._quant_mode = quant_mode
-        self._weights = self._n*self._k*quant_mode.value.memory 
-    def query(self, database:PerfDatabase, **kwargs):
+        self._weights = self._n*self._k*quant_mode.value.memory
+
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         x = kwargs.get('x')
         overwrite_quant_mode = kwargs.get('quant_mode', None)
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-            
-        return database.query_gemm(x, self._n, self._k, quant_mode)*self._scale_factor
-    
+
+        # Query returns (latency, power) or just latency for backward compatibility
+        result = database.query_gemm(x, self._n, self._k, quant_mode, power_limit=self._power_limit)
+
+        # Handle both tuple and single value returns for backward compatibility
+        if isinstance(result, tuple):
+            latency, power = result
+        else:
+            latency = result
+            power = 0.0  # Default if power not available
+
+        return (latency * self._scale_factor, power)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor     
 
@@ -105,21 +139,22 @@ class MoE(Operation):
     """
     MoE operation.
     """
-    def __init__(self, 
-                 name: str, 
-                 scale_factor: float, 
-                 hidden_size: int, 
-                 inter_size: int, 
-                 topk: int, 
-                 num_experts: int, 
-                 moe_tp_size: int, 
-                 moe_ep_size: int, 
-                 quant_mode: common.MoEQuantMode, 
-                 workload_distribution: str, 
+    def __init__(self,
+                 name: str,
+                 scale_factor: float,
+                 hidden_size: int,
+                 inter_size: int,
+                 topk: int,
+                 num_experts: int,
+                 moe_tp_size: int,
+                 moe_ep_size: int,
+                 quant_mode: common.MoEQuantMode,
+                 workload_distribution: str,
                  attention_dp_size: int,
                  is_context: bool = True,
+                 power_limit: Optional[int] = None,
                  **kwargs) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, power_limit)
         self._hidden_size = hidden_size
         self._inter_size = inter_size
         self._quant_mode = quant_mode
@@ -132,23 +167,35 @@ class MoE(Operation):
         self._is_context = is_context
         self._moe_backend = kwargs.get('moe_backend', 'deepep_moe')
         self._weights = self._hidden_size*self._inter_size*self._num_experts*quant_mode.value.memory*3 // self._moe_ep_size // self._moe_tp_size # 3 for ffn1,gate,ffn2; 2 for float16
-    
-    def query(self, database:PerfDatabase, **kwargs):
-        # attention dp size will scale up the total input tokens. 
+
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
+        # attention dp size will scale up the total input tokens.
         x = kwargs.get('x') * self._attention_dp_size
         overwrite_quant_mode = kwargs.get('quant_mode', None)
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-        return database.query_moe(num_tokens=x, 
-                                 hidden_size=self._hidden_size, 
-                                 inter_size=self._inter_size, 
-                                 topk=self._topk, 
-                                 num_experts=self._num_experts,
-                                 moe_tp_size=self._moe_tp_size,
-                                 moe_ep_size=self._moe_ep_size, 
-                                 quant_mode=quant_mode, 
-                                 workload_distribution=self._workload_distribution,
-                                 is_context=self._is_context,
-                                 moe_backend=self._moe_backend)*self._scale_factor
+
+        result = database.query_moe(
+            num_tokens=x,
+            hidden_size=self._hidden_size,
+            inter_size=self._inter_size,
+            topk=self._topk,
+            num_experts=self._num_experts,
+            moe_tp_size=self._moe_tp_size,
+            moe_ep_size=self._moe_ep_size,
+            quant_mode=quant_mode,
+            workload_distribution=self._workload_distribution,
+            is_context=self._is_context,
+            moe_backend=self._moe_backend,
+            power_limit=self._power_limit
+        )
+
+        if isinstance(result, tuple):
+            latency, power = result
+        else:
+            latency = result
+            power = 0.0
+
+        return (latency * self._scale_factor, power)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -311,16 +358,17 @@ class ContextAttention(Operation):
     """
     Context attention operation.
     """
-    def __init__(self, 
-                 name: str, 
-                 scale_factor: float, 
-                 n: int, 
-                 n_kv: int, 
-                 kvcache_quant_mode: common.KVCacheQuantMode, 
+    def __init__(self,
+                 name: str,
+                 scale_factor: float,
+                 n: int,
+                 n_kv: int,
+                 kvcache_quant_mode: common.KVCacheQuantMode,
                  fmha_quant_mode: common.FMHAQuantMode,
                  window_size: int = 0,
-                 head_size: int = 128) -> None:
-        super().__init__(name, scale_factor)
+                 head_size: int = 128,
+                 power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._n = n
         self._weights = 0.0
         self._n_kv = n_kv
@@ -329,14 +377,26 @@ class ContextAttention(Operation):
         self._window_size = window_size
         self._head_size = head_size
 
-    def query(self, database:PerfDatabase, **kwargs):
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         batch_size = kwargs.get('batch_size')
         isl = kwargs.get('s')
-        return database.query_context_attention(batch_size, isl, self._n, self._n_kv, 
-                                                self._kvcache_quant_mode, self._fmha_quant_mode,
-                                                window_size=self._window_size,
-                                                head_size=self._head_size)*self._scale_factor
-    
+
+        result = database.query_context_attention(
+            batch_size, isl, self._n, self._n_kv,
+            self._kvcache_quant_mode, self._fmha_quant_mode,
+            window_size=self._window_size,
+            head_size=self._head_size,
+            power_limit=self._power_limit
+        )
+
+        if isinstance(result, tuple):
+            latency, power = result
+        else:
+            latency = result
+            power = 0.0
+
+        return (latency * self._scale_factor, power)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -344,32 +404,45 @@ class GenerationAttention(Operation):
     """
     Generation attention operation.
     """
-    def __init__(self, 
-                 name: str, 
-                 scale_factor: float, 
-                 n: int, 
-                 n_kv: int, 
+    def __init__(self,
+                 name: str,
+                 scale_factor: float,
+                 n: int,
+                 n_kv: int,
                  kv_cache_dtype: common.KVCacheQuantMode,
                  window_size: int = 0,
-                 head_size: int = 128) -> None:
-        super().__init__(name, scale_factor)
+                 head_size: int = 128,
+                 power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._n = n
         self._weights = 0.0
         self._n_kv = n_kv
         self._kv_cache_dtype = kv_cache_dtype
         self._window_size = window_size
-        self._head_size = head_size 
+        self._head_size = head_size
 
-    def query(self, database:PerfDatabase, **kwargs):
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         beam_width = kwargs.get('beam_width')
         assert(beam_width == 1), "only support beam_width=1"
         batch_size = kwargs.get('batch_size')
         s = kwargs.get('s')
-        return database.query_generation_attention(batch_size, s, self._n, self._n_kv, 
-                                                   self._kv_cache_dtype,
-                                                   window_size=self._window_size,
-                                                   head_size=self._head_size)*self._scale_factor
- 
+
+        result = database.query_generation_attention(
+            batch_size, s, self._n, self._n_kv,
+            self._kv_cache_dtype,
+            window_size=self._window_size,
+            head_size=self._head_size,
+            power_limit=self._power_limit
+        )
+
+        if isinstance(result, tuple):
+            latency, power = result
+        else:
+            latency = result
+            power = 0.0
+
+        return (latency * self._scale_factor, power)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -377,22 +450,26 @@ class ContextMLA(Operation):
     """
     Context MLA operation. now only contains MHA part.
     """
-    def __init__(self, 
-                 name: str, 
-                 scale_factor: float, 
-                 num_heads: int, 
-                 kvcache_quant_mode: common.KVCacheQuantMode, fmha_quant_mode: common.FMHAQuantMode) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self,
+                 name: str,
+                 scale_factor: float,
+                 num_heads: int,
+                 kvcache_quant_mode: common.KVCacheQuantMode,
+                 fmha_quant_mode: common.FMHAQuantMode,
+                 power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._num_heads = num_heads
         self._weights = 0. #2*(1536*24576/tp_size + 128/tp_size*512*128+128/tp_size*512*128) # up q, up k, up v  float16 # 104MB / tpsize per layer
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
 
-    def query(self, database:PerfDatabase, **kwargs):
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         batch_size = kwargs.get('batch_size')
         isl = kwargs.get('s')
-        return database.query_context_mla(batch_size, isl, self._num_heads, self._kvcache_quant_mode, self._fmha_quant_mode)*self._scale_factor
-    
+        latency = database.query_context_mla(batch_size, isl, self._num_heads, self._kvcache_quant_mode, self._fmha_quant_mode)*self._scale_factor
+        # MLA operations may not have power profiling data yet
+        return (latency, 0.0)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -400,23 +477,26 @@ class GenerationMLA(Operation):
     """
     Generation MLA operation. now only contains MQA part.
     """
-    def __init__(self, 
-                 name: str, 
-                 scale_factor: float, 
-                 num_heads: int, 
-                 kv_cache_dtype: common.KVCacheQuantMode) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self,
+                 name: str,
+                 scale_factor: float,
+                 num_heads: int,
+                 kv_cache_dtype: common.KVCacheQuantMode,
+                 power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._num_heads = num_heads
         self._weights = 0. # 2*(1536*24576/tp_size + 128/tp_size*512*128+128/tp_size*512*128) # up q, up k, v up  float16
         self._kv_cache_dtype = kv_cache_dtype
 
-    def query(self, database:PerfDatabase, **kwargs):
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         beam_width = kwargs.get('beam_width')
         assert(beam_width == 1), "only support beam_width=1"
         batch_size = kwargs.get('batch_size')
         s = kwargs.get('s')
-        return database.query_generation_mla(batch_size, s, self._num_heads, self._kv_cache_dtype)*self._scale_factor
- 
+        latency = database.query_generation_mla(batch_size, s, self._num_heads, self._kv_cache_dtype)*self._scale_factor
+        # MLA operations may not have power profiling data yet
+        return (latency, 0.0)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -424,24 +504,27 @@ class MLABmm(Operation):
     """
     MLABmm operation. consider to be contained by mla op. for now, keep it as a separate op to show the cost of bmm
     """
-    def __init__(self, 
-                 name: str, 
-                 scale_factor: float, 
-                 num_heads: int, 
-                 quant_mode: common.GEMMQuantMode, 
-                 if_pre: bool=True) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self,
+                 name: str,
+                 scale_factor: float,
+                 num_heads: int,
+                 quant_mode: common.GEMMQuantMode,
+                 if_pre: bool=True,
+                 power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._num_heads = num_heads
-        self._weights = 0. 
+        self._weights = 0.
         self._quant_mode = quant_mode
         self._if_pre = if_pre
 
-    def query(self, database:PerfDatabase, **kwargs):
+    def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         beam_width = kwargs.get('beam_width')
         assert(beam_width == 1), "only support beam_width=1"
         batch_size = kwargs.get('batch_size')
-        return database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)*self._scale_factor
- 
+        latency = database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)*self._scale_factor
+        # MLABmm operations may not have power profiling data yet
+        return (latency, 0.0)
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
     
@@ -454,8 +537,9 @@ class Embedding(Operation):
                  scale_factor: float, 
                  row_size: int, 
                  column_size: int, 
-                 empirical_bw_scaling_factor: float=0.3) -> None:
-        super().__init__(name, scale_factor)
+                 empirical_bw_scaling_factor: float=0.3,
+                 power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._row_size = row_size
         self._column_size = column_size
         self._weights = row_size * column_size * 2
@@ -467,7 +551,12 @@ class Embedding(Operation):
         x = kwargs.get('x')
         d2d_bytes = x * self._column_size * 2
         
-        return database.query_mem_op(d2d_bytes) * self._scale_factor
+        latency = database.query_mem_op(d2d_bytes) * self._scale_factor
+
+        # Memory-bound operations use a default power draw of 70W regardless of power limit
+        power = 70.0
+
+        return (latency, power)
   
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -476,13 +565,14 @@ class ElementWise(Operation):
     """
     Element-wise operation.
     """
-    def __init__(self, 
-                 name: str, 
-                 scale_factor: float, 
-                 dim_in: int, 
-                 dim_out: int, 
-                 empirical_bw_scaling_factor: float=0.8) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self,
+                 name: str,
+                 scale_factor: float,
+                 dim_in: int,
+                 dim_out: int,
+                 empirical_bw_scaling_factor: float=0.8,
+                 power_limit: Optional[int] = None) -> None:
+        super().__init__(name, scale_factor, power_limit)
         self._weights = 0.
         self._empirical_bw_scaling_factor = empirical_bw_scaling_factor
         self._constant_latency = 5e-6 # 5us
@@ -490,12 +580,17 @@ class ElementWise(Operation):
         self._dim_out = dim_out
 
     #sol only
-    def query(self, database: PerfDatabase, **kwargs):
+    def query(self, database: PerfDatabase, **kwargs) -> Tuple[float, float]:
         x = kwargs.get('x') # num tokens
         read_bytes = x * self._dim_in * 2 # fp16 for act
         write_bytes = x * self._dim_out * 2
-        
-        return database.query_mem_op(read_bytes + write_bytes) * self._scale_factor
+
+        latency = database.query_mem_op(read_bytes + write_bytes) * self._scale_factor
+
+        # ElementWise operations use a default power draw of 70W regardless of power limit
+        power = 70.0
+
+        return (latency, power)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -504,6 +599,8 @@ class MLP(Operation):
     """
     MLP operation for DeepSeek model's shared expert.
     This handles the gate, ffn1, and ffn2 operations in a single class.
+
+    XXX(J1): This is only used by the SGLang backend, so this is excluded from power-aware modeling for now.
     """
     def __init__(self, name: str, scale_factor: float, hidden_size: int, intermediate_size: int, quant_mode: common.GEMMQuantMode) -> None:
         super().__init__(name, scale_factor)

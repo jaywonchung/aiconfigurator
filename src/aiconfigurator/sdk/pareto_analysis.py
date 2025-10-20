@@ -73,11 +73,13 @@ def enumerate_parallel_config(num_gpu_list: list[int],
     return parallel_config_list
 
 def agg_pareto(model_name: str,
-               runtime_config: config.RuntimeConfig, 
+               runtime_config: config.RuntimeConfig,
                database: PerfDatabase,
                backend_name: str,
                model_config: config.ModelConfig,
-               parallel_config_list: list[list[int]]) -> pd.DataFrame:
+               parallel_config_list: list[list[int]],
+               power_limits: Optional[list[int]] = None,
+               cluster_power_budget: Optional[float] = None) -> pd.DataFrame:
     """
     Find Pareto front for agg.
     We will first enumerate all the parallel configurations and then find the Pareto front for each parallel configuration.
@@ -89,62 +91,73 @@ def agg_pareto(model_name: str,
         backend_name: name of the backend
         model_config: model config
         parallel_config_list: list of parallel configurations
-    
+        power_limits: list of power limits (W) to explore. If None, uses max available power.
+        cluster_power_budget: total cluster power budget in Watts for filtering/coloring
+
     Returns:
         results_df: dataframe of the results
     """
-    
+
     tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+
+    # If no power limits specified, use None (operations will default to max)
+    if power_limits is None:
+        power_limits = [None]
 
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
-    for parallel_config in parallel_config_list:
-        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
-        logger.debug(f"Getting candidate workers with parallel config: tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size}")
-        
-        try:
-            overwritten_model_config = copy.deepcopy(model_config)
-            overwritten_model_config.pp_size = pp_size
-            overwritten_model_config.tp_size = tp_size
-            overwritten_model_config.moe_tp_size = moe_tp_size
-            overwritten_model_config.moe_ep_size = moe_ep_size
-            overwritten_model_config.attention_dp_size = dp_size
-            model = get_model(model_name=model_name, model_config=overwritten_model_config, backend_name=backend_name)
-            backend = get_backend(backend_name)
-            sess = InferenceSession(model=model, database=database, backend=backend)
-            for tpot in tpot_list:
-                overwritten_runtime_config = copy.deepcopy(runtime_config)
-                overwritten_runtime_config.tpot = tpot
-                summary = sess.find_best_agg_result_under_constraints(runtime_config=overwritten_runtime_config,
-                                                        top_k=10, max_batch_size=512, ctx_stride=512)
-                result_df = summary.get_summary_df()
-                if (len(result_df) == 0):
-                    logger.debug(f"No result found for tpot {tpot}ms in agg pareto.")
-                    continue
-                if len(results_df) == 0:
-                    results_df = result_df
-                else:
-                    results_df = pd.concat([results_df, result_df], axis=0, ignore_index=True)
-        except Exception as e:
-            logger.error(f"Error getting candidate workers with parallel config: tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size}, skip this combination: {traceback.format_exc()}")
-            continue
+    for power_limit in power_limits:
+        for parallel_config in parallel_config_list:
+            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+            logger.debug(f"Getting candidate workers with power_limit={power_limit}W, parallel config: tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size}")
+
+            try:
+                overwritten_model_config = copy.deepcopy(model_config)
+                overwritten_model_config.pp_size = pp_size
+                overwritten_model_config.tp_size = tp_size
+                overwritten_model_config.moe_tp_size = moe_tp_size
+                overwritten_model_config.moe_ep_size = moe_ep_size
+                overwritten_model_config.attention_dp_size = dp_size
+                overwritten_model_config.power_limit = power_limit
+                model = get_model(model_name=model_name, model_config=overwritten_model_config, backend_name=backend_name)
+                backend = get_backend(backend_name)
+                sess = InferenceSession(model=model, database=database, backend=backend)
+                for tpot in tpot_list:
+                    overwritten_runtime_config = copy.deepcopy(runtime_config)
+                    overwritten_runtime_config.tpot = tpot
+                    summary = sess.find_best_agg_result_under_constraints(runtime_config=overwritten_runtime_config,
+                                                            top_k=10, max_batch_size=512, ctx_stride=512)
+                    result_df = summary.get_summary_df()
+                    if (len(result_df) == 0):
+                        logger.debug(f"No result found for tpot {tpot}ms in agg pareto.")
+                        continue
+                    if len(results_df) == 0:
+                        results_df = result_df
+                    else:
+                        results_df = pd.concat([results_df, result_df], axis=0, ignore_index=True)
+            except Exception as e:
+                logger.error(f"Error getting candidate workers with power_limit={power_limit}W, parallel config: tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size}, skip this combination: {traceback.format_exc()}")
+                continue
 
     results_df = results_df.sort_values(by='tokens/s/gpu', ascending=False).reset_index(drop=True)
 
     return results_df
 
 def disagg_pareto(model_name: str,
-                  runtime_config: config.RuntimeConfig, 
+                  runtime_config: config.RuntimeConfig,
                   prefill_database: PerfDatabase,
-                  prefill_backend_name: str, 
-                  prefill_model_config: config.ModelConfig, 
-                  prefill_parallel_config_list: list[list[int]], 
+                  prefill_backend_name: str,
+                  prefill_model_config: config.ModelConfig,
+                  prefill_parallel_config_list: list[list[int]],
                   prefill_latency_correction_scale: float,
-                  decode_database: PerfDatabase, 
-                  decode_backend_name: str, 
-                  decode_model_config: config.ModelConfig, 
-                  decode_parallel_config_list: list[list[int]], 
+                  decode_database: PerfDatabase,
+                  decode_backend_name: str,
+                  decode_model_config: config.ModelConfig,
+                  decode_parallel_config_list: list[list[int]],
                   decode_latency_correction_scale: float,
+                  prefill_power_limits: Optional[list[int]] = None,
+                  decode_power_limits: Optional[list[int]] = None,
+                  cluster_power_budget: Optional[float] = None,
                   **kwargs) -> pd.DataFrame:
     """
     Find Pareto front for Disaggregated Inference.
@@ -163,6 +176,9 @@ def disagg_pareto(model_name: str,
         decode_model_config: decode model config
         decode_parallel_config_list: decode parallel config list
         decode_latency_correction_scale: decode latency correction scale
+        prefill_power_limits: list of power limits (W) for prefill workers. If None, uses max available power.
+        decode_power_limits: list of power limits (W) for decode workers. If None, uses max available power.
+        cluster_power_budget: total cluster power budget in Watts for filtering/coloring
         **kwargs: other arguments
         prefill_max_num_tokens: max number of tokens for prefill worker, in kwargs
         decode_max_num_tokens: max number of tokens for decode worker, in kwargs
@@ -172,7 +188,7 @@ def disagg_pareto(model_name: str,
         prefill_max_num_worker: max number of prefill workers in a disagg replica composed of xPyD, x_max, in kwargs
         decode_num_worker_list: list of number of decode workers in a disagg replica composed of xPyD, y_list, in kwargs
         decode_max_num_worker: max number of decode workers in a disagg replica composed of xPyD, y_max, in kwargs
-    
+
     Returns:
         results_df: dataframe of the results
     """
@@ -195,6 +211,12 @@ def disagg_pareto(model_name: str,
                 logger.debug(f"no constraint on {working_list}")
         return working_list
     
+    # If no power limits specified, use None (operations will default to max)
+    if prefill_power_limits is None:
+        prefill_power_limits = [None]
+    if decode_power_limits is None:
+        decode_power_limits = [None]
+
     prefill_backend = get_backend(prefill_backend_name)
     decode_backend = get_backend(decode_backend_name)
 
@@ -216,26 +238,48 @@ def disagg_pareto(model_name: str,
     prefill_max_num_worker = kwargs.get('prefill_max_num_worker', None)
     logger.debug(f"prefill_num_worker_list: {prefill_num_worker_list}, prefill_max_num_worker: {prefill_max_num_worker}")
     prefill_num_worker_list = get_working_list(prefill_num_worker_list, prefill_max_num_worker)
-    
+
     # decode worker constraint
     decode_num_worker_list = kwargs.get('decode_num_worker_list', None)
     decode_max_num_worker = kwargs.get('decode_max_num_worker', None)
     logger.debug(f"decode_num_worker_list: {decode_num_worker_list}, decode_max_num_worker: {decode_max_num_worker}")
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
-    summary = disagg_sess.find_best_disagg_result_under_constraints(model_name=model_name,
-                                                                    runtime_config=runtime_config,
-                                                                    prefill_model_config=prefill_model_config,
-                                                                    prefill_parallel_config_list=prefill_parallel_config_list,
-                                                                    prefill_max_num_tokens=prefill_max_num_tokens,
-                                                                    prefill_num_worker_list=prefill_num_worker_list,
-                                                                    decode_model_config=decode_model_config,
-                                                                    decode_parallel_config_list=decode_parallel_config_list,
-                                                                    decode_max_num_tokens=decode_max_num_tokens,
-                                                                    decode_num_worker_list=decode_num_worker_list,
-                                                                    num_gpu_list=num_gpu_list)
+    # Loop over power limits for prefill and decode workers
+    all_results = []
+    for prefill_power_limit in prefill_power_limits:
+        for decode_power_limit in decode_power_limits:
+            logger.debug(f"Searching with prefill_power_limit={prefill_power_limit}W, decode_power_limit={decode_power_limit}W")
 
-    return summary.get_summary_df()
+            # Update model configs with power limits
+            overwritten_prefill_model_config = copy.deepcopy(prefill_model_config)
+            overwritten_prefill_model_config.power_limit = prefill_power_limit
+            overwritten_decode_model_config = copy.deepcopy(decode_model_config)
+            overwritten_decode_model_config.power_limit = decode_power_limit
+
+            summary = disagg_sess.find_best_disagg_result_under_constraints(
+                model_name=model_name,
+                runtime_config=runtime_config,
+                prefill_model_config=overwritten_prefill_model_config,
+                prefill_parallel_config_list=prefill_parallel_config_list,
+                prefill_max_num_tokens=prefill_max_num_tokens,
+                prefill_num_worker_list=prefill_num_worker_list,
+                decode_model_config=overwritten_decode_model_config,
+                decode_parallel_config_list=decode_parallel_config_list,
+                decode_max_num_tokens=decode_max_num_tokens,
+                decode_num_worker_list=decode_num_worker_list,
+                num_gpu_list=num_gpu_list
+            )
+            result_df = summary.get_summary_df()
+            if len(result_df) > 0:
+                all_results.append(result_df)
+
+    # Combine all results
+    if len(all_results) == 0:
+        return pd.DataFrame()  # Return empty DataFrame if no results
+    combined_df = pd.concat(all_results, axis=0, ignore_index=True)
+
+    return combined_df
 
 
 def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:

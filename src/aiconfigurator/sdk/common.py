@@ -88,36 +88,39 @@ AllReduceStrategy = {'NCCL', 'ONESHOT', 'TWOSHOT', 'AUTO'}
 """
 Columns for static inference summary dataframe
 """
-ColumnsStatic = ['model', 'isl', 'osl', 
+ColumnsStatic = ['model', 'isl', 'osl',
                  'concurrency', 'request_rate', 'bs', 'global_bs',
-                 'ttft', 'tpot', 'seq/s', 'seq/s/gpu', 'tokens/s', 'tokens/s/gpu', 'tokens/s/user', 'latency', 'context_latency', 'generation_latency', 
+                 'ttft', 'tpot', 'seq/s', 'seq/s/gpu', 'tokens/s', 'tokens/s/gpu', 'tokens/s/user', 'latency', 'context_latency', 'generation_latency',
+                 'power_limit', 'power', 'total_cluster_power',  # Power-related columns
                  'num_total_gpus',
                  'tp', 'pp', 'dp', 'moe_tp', 'moe_ep', 'parallel',
                  'gemm', 'kvcache', 'fmha', 'moe', 'comm',
-                 'memory', 
+                 'memory',
                  'backend', 'version', 'system']
 
 """
 Columns for Agg inference summary dataframe
 """
-ColumnsAgg = ['model', 'isl', 'osl', 
+ColumnsAgg = ['model', 'isl', 'osl',
               'concurrency', 'request_rate', 'bs', 'global_bs',
-              'ttft', 'tpot', 'seq/s', 'seq/s/gpu', 'tokens/s', 'tokens/s/gpu', 'tokens/s/user', 
+              'ttft', 'tpot', 'seq/s', 'seq/s/gpu', 'tokens/s', 'tokens/s/gpu', 'tokens/s/user',
+              'power_limit', 'power', 'total_cluster_power',  # Power-related columns
               'num_total_gpus',
               'tp', 'pp', 'dp', 'moe_tp', 'moe_ep', 'parallel',
               'gemm', 'kvcache', 'fmha', 'moe', 'comm',
-              'memory', 
+              'memory',
               'balance_score','num_ctx_reqs','num_gen_reqs','num_tokens','ctx_tokens','gen_tokens', # agg specific
               'backend', 'version', 'system']             
 
 """
 Columns for disaggregated inference summary dataframe
 """
-ColumnsDisagg = ['model', 'isl', 'osl', 
+ColumnsDisagg = ['model', 'isl', 'osl',
                  'concurrency', 'request_rate', '(p)bs', '(p)global_bs', '(p)workers', '(d)bs', '(d)global_bs', '(d)workers',
                  'ttft', 'tpot', 'seq/s', 'seq/s/gpu', 'tokens/s', 'tokens/s/gpu', 'tokens/s/user', '(p)seq/s/worker', '(d)seq/s/worker',
+                 '(p)power_limit', '(p)power', '(d)power_limit', '(d)power', 'total_cluster_power',  # Power-related columns
                  'num_total_gpus',
-                 '(p)tp', '(p)pp', '(p)dp', '(p)moe_tp', '(p)moe_ep', '(p)parallel', 
+                 '(p)tp', '(p)pp', '(p)dp', '(p)moe_tp', '(p)moe_ep', '(p)parallel',
                  '(p)gemm', '(p)kvcache', '(p)fmha', '(p)moe', '(p)comm',
                  '(p)memory',
                  '(p)backend', '(p)version', '(p)system',
