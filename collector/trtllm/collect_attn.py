@@ -14,7 +14,6 @@ from tensorrt_llm._torch.pyexecutor.resource_manager import KVCacheManager
 from tensorrt_llm._torch.metadata import KVCacheParams
 from tensorrt_llm.llmapi import KvCacheConfig
 import os
-import time
 from helper import (
     getSMVersion,
     log_perf,
@@ -37,7 +36,7 @@ def run_attention_torch(batch_size,
                         device='cuda:0',
                         zeus_monitor=None,
                         power_limit=None,
-                        benchmark_duration=3.0):
+                        power_benchmark_duration=3.0):
     """
     Run attention benchmark with optional energy profiling.
 
@@ -45,10 +44,9 @@ def run_attention_torch(batch_size,
         Additional args for power profiling:
         zeus_monitor: ZeusMonitor instance (optional)
         power_limit: GPU power limit in Watts (optional)
-        benchmark_duration: Target duration for memory-bound benchmarks
+        power_benchmark_duration: Target duration for memory-bound benchmarks
     """
     device=torch.device(device)
-    device_id = device.index
     torch.set_default_device(device)
     torch.cuda.set_device(device)
 
@@ -254,7 +252,7 @@ def run_attention_torch(batch_size,
                     warmup_fn,
                     benchmark_fn,
                     warmup_latency,
-                    target_duration_sec=benchmark_duration
+                    target_duration_sec=power_benchmark_duration
                 )
     else:
         # No power limit specified - legacy mode

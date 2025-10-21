@@ -9,7 +9,6 @@ from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 import tensorrt_llm.quantization.utils.fp4_utils as fp4_utils
 import math
-import time
 from helper import (
     getSMVersion,
     log_perf,
@@ -47,7 +46,7 @@ def get_gemm_test_cases():
 
 
 def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0',
-             zeus_monitor=None, power_limit=None, benchmark_duration=3.0):
+             zeus_monitor=None, power_limit=None, power_benchmark_duration=3.0):
     """
     Run GEMM benchmark with optional energy profiling.
 
@@ -58,7 +57,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0',
         device: CUDA device
         zeus_monitor: ZeusMonitor instance (optional)
         power_limit: GPU power limit in Watts (optional)
-        benchmark_duration: Target duration for memory-bound benchmarks
+        power_benchmark_duration: Target duration for memory-bound benchmarks
     """
     device = torch.device(device)
     device_id = device.index
@@ -166,7 +165,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0',
                     warmup_fn,
                     benchmark_fn,
                     warmup_latency,
-                    target_duration_sec=benchmark_duration
+                    target_duration_sec=power_benchmark_duration
                 )
     else:
         # No power limit specified - legacy mode

@@ -273,7 +273,7 @@ def log_perf(item_list: list[dict],
 
         f.write(content_prefix + '\n')
 
-# Dtype size mapping for power profiling
+# Dtype size mapping for arithmetic intensity calculations
 DTYPE_SIZES = {
     'float16': 2,
     'fp16': 2,
