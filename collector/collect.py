@@ -149,9 +149,6 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
         worker_logger.error(f"Failed to initialize Zeus: {e}")
         raise  # Zeus is required, fail if not available
 
-    # Check if this is a communication kernel (no power sweep)
-    is_communication = 'allreduce' in module_name.lower() or 'nccl' in module_name.lower() or 'comm' in module_name.lower()
-
     # Process tasks
     while True:
         task_info = queue.get()
@@ -167,21 +164,30 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
 
-        if is_communication:
-            # Communication: run once at default power limit
+        # Sweep power limits for computation kernels
+        for power_limit in power_limits:
             with lock:
                 progress_value.value += 1
 
+            # Set power limit
             try:
-                worker_logger.debug(f"Starting communication task {task_id}")
+                set_gpu_power_limit(device_id, power_limit)
+                worker_logger.debug(f"Set power limit to {power_limit}W on device {device_id}")
+            except Exception as e:
+                worker_logger.warning(f"Failed to set power limit: {e}")
+
+            try:
+                worker_logger.debug(f"Starting task {task_id} at {power_limit}W")
                 result = func(*task, device, zeus_monitor=zeus_monitor,
+                            power_limit=power_limit,
                             power_benchmark_duration=power_benchmark_duration)
-                worker_logger.debug(f"Completed task {task_id}")
+                worker_logger.debug(f"Completed task {task_id} at {power_limit}W")
             except Exception as e:
                 error_info = {
                     'module': module_name,
                     'device_id': device_id,
                     'task_id': task_id,
+                    'power_limit': power_limit,
                     'task_params': str(task),
                     'error_type': type(e).__name__,
                     'error_message': str(e),
@@ -192,53 +198,12 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 if error_queue:
                     error_queue.put(error_info)
 
-                worker_logger.error(f"Task {task_id} failed: {type(e).__name__}: {e}")
+                worker_logger.error(f"Task {task_id} failed at {power_limit}W: {type(e).__name__}: {e}")
                 worker_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
 
                 # Force flush logs
                 for handler in worker_logger.handlers:
                     handler.flush()
-        else:
-            # Computation: sweep power limits
-            for power_limit in power_limits:
-                with lock:
-                    progress_value.value += 1
-
-                # Set power limit
-                try:
-                    set_gpu_power_limit(device_id, power_limit)
-                    worker_logger.debug(f"Set power limit to {power_limit}W on device {device_id}")
-                except Exception as e:
-                    worker_logger.warning(f"Failed to set power limit: {e}")
-
-                try:
-                    worker_logger.debug(f"Starting task {task_id} at {power_limit}W")
-                    result = func(*task, device, zeus_monitor=zeus_monitor,
-                                power_limit=power_limit,
-                                power_benchmark_duration=power_benchmark_duration)
-                    worker_logger.debug(f"Completed task {task_id} at {power_limit}W")
-                except Exception as e:
-                    error_info = {
-                        'module': module_name,
-                        'device_id': device_id,
-                        'task_id': task_id,
-                        'power_limit': power_limit,
-                        'task_params': str(task),
-                        'error_type': type(e).__name__,
-                        'error_message': str(e),
-                        'traceback': traceback.format_exc(),
-                        'timestamp': datetime.now().isoformat()
-                    }
-
-                    if error_queue:
-                        error_queue.put(error_info)
-
-                    worker_logger.error(f"Task {task_id} failed at {power_limit}W: {type(e).__name__}: {e}")
-                    worker_logger.debug(f"Full traceback:\n{traceback.format_exc()}")
-
-                    # Force flush logs
-                    for handler in worker_logger.handlers:
-                        handler.flush()
 
     # Save power timeline if available
     if power_monitor:
@@ -262,14 +227,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown",
     lock = manager.Lock()
 
     # Calculate total tasks considering power limit sweeps
-    total_tasks = len(tasks)
-    if 'comm' not in module_name.lower() and 'allreduce' not in module_name.lower():
-        # Computation kernels: multiply by power limits
-        total_tasks = len(tasks) * len(power_limits)
-        logger.info(f"Computation kernels: {len(tasks)} tasks × {len(power_limits)} power limits = {total_tasks} total runs")
-    else:
-        # Communication kernels: run once
-        logger.info(f"Communication kernels: {total_tasks} tasks (no power sweep)")
+    total_tasks = len(tasks) * len(power_limits)
+    logger.info(f"{len(tasks)} tasks × {len(power_limits)} power limits = {total_tasks} total runs")
 
     # Track process health
     process_stats = {i: {'restarts': 0, 'errors': []} for i in range(num_processes)}
