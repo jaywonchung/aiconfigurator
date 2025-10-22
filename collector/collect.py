@@ -143,7 +143,6 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     # Initialize Zeus monitors
     try:
         zeus_monitor = ZeusMonitor(gpu_indices=[device_id])
-        power_monitor = PowerMonitor(gpu_indices=[device_id], update_period=0.2)
         worker_logger.info(f"Zeus power monitoring enabled on device {device_id}")
     except Exception as e:
         worker_logger.error(f"Failed to initialize Zeus: {e}")
@@ -204,17 +203,6 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 # Force flush logs
                 for handler in worker_logger.handlers:
                     handler.flush()
-
-    # Save power timeline if available
-    if power_monitor:
-        try:
-            power_timeline = power_monitor.get_all_power_timelines()
-            timeline_file = f'power_timeline_worker_{device_id}.json'
-            with open(timeline_file, 'w') as f:
-                json.dump(power_timeline, f)
-            worker_logger.info(f"Saved power timeline to {timeline_file}")
-        except Exception as e:
-            worker_logger.warning(f"Failed to save power timeline: {e}")
 
 def parallel_run(tasks, func, num_processes, module_name="unknown",
                 power_limits=None, power_benchmark_duration=DEFAULT_POWER_BENCHMARK_DURATION):
@@ -645,12 +633,23 @@ def main():
 
     mp.set_start_method('spawn')
 
-    if args.backend == 'trtllm':
-        collect_trtllm(num_processes, ops, power_limits, args.power_benchmark_duration)
-    elif args.backend == 'sglang':
-        collect_sglang(num_processes)
-    elif args.backend == 'vllm':
-        collect_vllm(num_processes)
+    power_monitor = PowerMonitor(update_period=0.25)
+
+    try:
+        if args.backend == 'trtllm':
+            collect_trtllm(num_processes, ops, power_limits, args.power_benchmark_duration)
+        elif args.backend == 'sglang':
+            collect_sglang(num_processes)
+        elif args.backend == 'vllm':
+            collect_vllm(num_processes)
+
+    finally:
+        power_timeline = power_monitor.get_all_power_timelines()
+        log_dir = os.environ.get("COLLECTOR_LOG_DIR", ".")
+        timeline_file = f'{log_dir}/power_timeline.json'
+        with open(timeline_file, 'w') as f:
+            json.dump(power_timeline, f)
+        logger.info(f"Saved power timeline to {timeline_file}")
 
 if __name__=="__main__":
     main()
