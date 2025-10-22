@@ -194,9 +194,8 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0',
         item['power_limit'] = power_limit
         item['power'] = power
         item['compute_bound'] = int(compute_bound)
-        if benchmark_start_time is not None:
-            item['benchmark_start_time'] = benchmark_start_time
-            item['benchmark_end_time'] = benchmark_end_time
+        item['benchmark_start_time'] = benchmark_start_time if benchmark_start_time is not None else ''
+        item['benchmark_end_time'] = benchmark_end_time if benchmark_end_time is not None else ''
 
     log_perf(
         item_list=[item],
