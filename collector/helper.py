@@ -365,13 +365,15 @@ def is_gemm_compute_bound(m, n, k, dtype, device_name):
     return arithmetic_intensity > hardware_intensity
 
 
-def is_context_attention_compute_bound(b, s, d, dtype, kv_cache_dtype, device_name):
+def is_context_attention_compute_bound(b, s, num_heads, num_key_value_heads, d, dtype, kv_cache_dtype, device_name):
     """
-    Determine if context (prefill) attention is compute-bound.
+    Determine if context (prefill) attention is compute-bound with Grouped-Query Attention.
 
     Args:
         b: Batch size
         s: Sequence length (input)
+        num_heads: Number of query heads (H_q)
+        num_key_value_heads: Number of key/value heads (H_kv)
         d: Head dimension
         dtype: Activation dtype
         kv_cache_dtype: KV cache dtype
@@ -392,14 +394,16 @@ def is_context_attention_compute_bound(b, s, d, dtype, kv_cache_dtype, device_na
 
     hardware_intensity = (hardware_tflops * 1e12) / (gpu_specs['mem_bw_gbs'] * 1e9)
 
-    # Attention FLOPs: 4 * b * s * s * d (approximate)
-    total_flops = 4 * b * s * s * d
+    # GQA Attention FLOPs: 4 * b * num_heads * s * s * d
+    # Each query head does s*s*d multiply-adds for QK^T and for softmax(QK^T)V
+    total_flops = 4 * b * num_heads * s * s * d
 
-    # Memory movement
+    # Memory movement for GQA
     memory_bytes = (
-        dtype_size * b * s * d +           # Q read
-        kv_dtype_size * 2 * b * s * d +    # K, V read
-        dtype_size * b * s * d             # Output write
+        dtype_size * b * s * num_heads * d +           # Q read (all query heads)
+        kv_dtype_size * b * s * num_key_value_heads * d +    # K read (KV heads)
+        kv_dtype_size * b * s * num_key_value_heads * d +    # V read (KV heads)
+        dtype_size * b * s * num_heads * d             # Output write (all query heads)
     )
 
     arithmetic_intensity = total_flops / memory_bytes

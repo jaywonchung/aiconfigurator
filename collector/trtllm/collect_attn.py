@@ -224,7 +224,7 @@ def run_attention_torch(batch_size,
     # Determine if compute-bound
     if is_context_phase:
         compute_bound = is_context_attention_compute_bound(
-            batch_size, input_len, head_dim, dtype_str, kv_cache_dtype_str, device_name
+            batch_size, input_len, num_heads, num_key_value_heads, head_dim, dtype_str, kv_cache_dtype_str, device_name
         )
     else:
         compute_bound = is_generation_attention_compute_bound()
