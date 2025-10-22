@@ -381,42 +381,43 @@ def get_generation_attention_test_cases():
     n_kv_list = [1,2,4,8]
     head_dim = [64,128]
 
-    # MHA
-    max_bsn = 8192*1024 #2*1024*1024*1024/128/2 INT32MAX/128/2
-    max_bsn_largeb = max_bsn//2
-    for n in sorted(n_list, reverse=True):
-        b_s_dict = {}
-        s_b_dict = {}        
-        for s in s_list:
-            max_b = max_bsn // s // n # b*s*n*byte <= max_bsn
-            for b in b_list:
-                if b > max_b:
-                    break
-                if s not in s_b_dict.keys():
-                    s_b_dict[s] = {b}
-                else:
-                    s_b_dict[s].add(b)
-        for s, b_set in s_b_dict.items():
-            if len(b_set) < 4:
-                continue
-            for b in b_set:
-                if b not in b_s_dict.keys():
-                    b_s_dict[b] = {s-1}
-                b_s_dict[b].add(s-1)
-        for h in head_dim:
-            for b, s_list_limited in b_s_dict.items():
-                target_s_list = sorted(s_list_limited)
-                if b >= 256:
-                    target_s_list = target_s_list[:-1]
-                #print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
-                # fp8 kv cache, fp8 context fmha, is_context_phase
-                for s in target_s_list:
-                    test_cases.append([b, s, n, n, h, 0, False, False, False, 'generation_attention_perf.txt'])
-
-                    if has_fp8:
-                        test_cases.append([b, s, n, n, h, 0, True, False, False, 'generation_attention_perf.txt'])
-                        # currently, fp8 is not for generation compute
-                        #test_cases.append([b, s, n, n, 128, True, True, False, 'generation_attention_perf.txt'])
+    # J1: Skipping MHA entirely
+    # # MHA
+    # max_bsn = 8192*1024 #2*1024*1024*1024/128/2 INT32MAX/128/2
+    # max_bsn_largeb = max_bsn//2
+    # for n in sorted(n_list, reverse=True):
+    #     b_s_dict = {}
+    #     s_b_dict = {}        
+    #     for s in s_list:
+    #         max_b = max_bsn // s // n # b*s*n*byte <= max_bsn
+    #         for b in b_list:
+    #             if b > max_b:
+    #                 break
+    #             if s not in s_b_dict.keys():
+    #                 s_b_dict[s] = {b}
+    #             else:
+    #                 s_b_dict[s].add(b)
+    #     for s, b_set in s_b_dict.items():
+    #         if len(b_set) < 4:
+    #             continue
+    #         for b in b_set:
+    #             if b not in b_s_dict.keys():
+    #                 b_s_dict[b] = {s-1}
+    #             b_s_dict[b].add(s-1)
+    #     for h in head_dim:
+    #         for b, s_list_limited in b_s_dict.items():
+    #             target_s_list = sorted(s_list_limited)
+    #             if b >= 256:
+    #                 target_s_list = target_s_list[:-1]
+    #             #print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
+    #             # fp8 kv cache, fp8 context fmha, is_context_phase
+    #             for s in target_s_list:
+    #                 test_cases.append([b, s, n, n, h, 0, False, False, False, 'generation_attention_perf.txt'])
+    #
+    #                 if has_fp8:
+    #                     test_cases.append([b, s, n, n, h, 0, True, False, False, 'generation_attention_perf.txt'])
+    #                     # currently, fp8 is not for generation compute
+    #                     #test_cases.append([b, s, n, n, 128, True, True, False, 'generation_attention_perf.txt'])
 
     # XQA
     max_bsn = 8192*1024*2 #2*1024*1024*1024/128/2

@@ -143,7 +143,7 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     # Initialize Zeus monitors
     try:
         zeus_monitor = ZeusMonitor(gpu_indices=[device_id])
-        power_monitor = PowerMonitor(gpu_indices=[device_id], update_period=0.1)
+        power_monitor = PowerMonitor(gpu_indices=[device_id], update_period=0.2)
         worker_logger.info(f"Zeus power monitoring enabled on device {device_id}")
     except Exception as e:
         worker_logger.error(f"Failed to initialize Zeus: {e}")
