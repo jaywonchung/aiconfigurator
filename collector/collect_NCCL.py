@@ -6,11 +6,14 @@ import os
 import subprocess
 import torch
 from helper import log_perf
+from zeus.monitor import ZeusMonitor
 
 def NCCL_benchmark(dtype: str,
                    NCCL_op: str = "all_gather",
                    test_range: str = "10,10000000,1000",
                    num_gpus: int = 8):
+    monitor = ZeusMonitor()
+
     NCCL_test_bin = ''
     if NCCL_op == "all_gather":
         NCCL_test_bin = 'all_gather_perf'
@@ -31,21 +34,31 @@ def NCCL_benchmark(dtype: str,
     bytes_per_element = 2 if dtype == 'half' else 1
     
     while size < max_size:
-        inner_loop = 100 if size <= 16777216 else 60
+        if size <= 1048576:
+            inner_loop = 1000
+        elif size <= 16777216:
+            inner_loop = 500
+        else:
+            inner_loop = 100
+
         cmd_args = [NCCL_test_bin, '-b', str(size), '-e', str(size), '-t', str(num_gpus), '-d', dtype, '-w', '40', '-a', '1', '-n', str(inner_loop), '-c', '0']
+        monitor.begin_window("nccl", sync_execution=False)
         result = subprocess.run(cmd_args, capture_output=True, text=True)
         print_lines = result.stdout.split('\n')
+        measurement = monitor.end_window("nccl", sync_execution=False)
         for index_line in range(len(print_lines)):
             if 'time' in print_lines[index_line]:
                 break
         latency = float(print_lines[index_line + 2].split()[5])*1e-3 # us to ms
+        power = sum(measurement.gpu_energy[i] for i in range(num_gpus)) / measurement.time
         
-        print(NCCL_test_bin, f"{size=}, {latency=}")
+        print(NCCL_test_bin, f"{size=}, {latency=}, {power=}")
         log_perf(item_list=[{ 
                     'nccl_dtype': dtype,
                     'num_gpus': num_gpus,
                     'message_size': size//bytes_per_element,
-                    'latency': latency
+                    'latency': latency,
+                    'power': power,
                     }], 
         framework='TRTLLM', 
         version=NCCL_version, 
