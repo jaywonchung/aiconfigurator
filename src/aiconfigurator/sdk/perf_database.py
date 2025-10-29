@@ -210,7 +210,10 @@ def get_all_databases(systems_dir : str = get_system_config_path()) -> Dict[str,
 # by default float16
 def load_custom_allreduce_data(custom_allreduce_file):
     """
-    Load the custom allreduce data for trtllm
+    Load the custom allreduce data for trtllm with power information.
+    Schema: custom_allreduce_data[dtype][tp_size][strategy][message_size] = (latency, power_per_gpu)
+    Note: The 'power' column in the CSV is aggregate power across all GPUs,
+          so we divide by tp_size to get per-GPU power.
     """
     if not os.path.exists(custom_allreduce_file):
         logger.warning(f"Custom allreduce data file {custom_allreduce_file} not found.")
@@ -222,6 +225,8 @@ def load_custom_allreduce_data(custom_allreduce_file):
         headers = reader.fieldnames
         rows = list(reader)
 
+    has_power = 'power' in headers
+
     for row in rows:
         dtype, tp_size, message_size, latency = \
             row['allreduce_dtype'], row['num_gpus'], row['message_size'], row['latency']
@@ -231,17 +236,28 @@ def load_custom_allreduce_data(custom_allreduce_file):
         tp_size = int(tp_size)
         dtype = common.CommQuantMode.half # TODO
 
+        # Read aggregate power and convert to per-GPU power
+        if has_power:
+            aggregate_power = float(row['power'])
+            power_per_gpu = aggregate_power / tp_size if tp_size > 0 else 0.0
+        else:
+            # Fallback to default if power column doesn't exist
+            power_per_gpu = 70.0
+
         try:
-            latency = custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
+            existing = custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
             logger.debug('value conflict in custom allreduce data: {} {} {} {} {}'.format(dtype, tp_size, allreduce_strategy, message_size, latency))
         except KeyError:
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = latency
+            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = (latency, power_per_gpu)
 
     return custom_allreduce_data
 
 def load_nccl_data(nccl_file):
     """
-    Load the nccl data
+    Load the nccl data with power information.
+    Schema: nccl_data[dtype][op_name][num_gpus][message_size] = (latency, power_per_gpu)
+    Note: The 'power' column in the CSV is aggregate power across all GPUs,
+          so we divide by num_gpus to get per-GPU power.
     """
     if not os.path.exists(nccl_file):
         logger.warning(f"NCCL data file {nccl_file} not found.")
@@ -252,7 +268,9 @@ def load_nccl_data(nccl_file):
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
-    
+
+    has_power = 'power' in headers
+
     for row in rows:
         dtype, num_gpus, message_size, op_name, latency = \
             row['nccl_dtype'], row['num_gpus'], row['message_size'], row['op_name'], row['latency']
@@ -260,12 +278,20 @@ def load_nccl_data(nccl_file):
         latency = float(latency)
         num_gpus = int(num_gpus)
 
+        # Read aggregate power and convert to per-GPU power
+        if has_power:
+            aggregate_power = float(row['power'])
+            power_per_gpu = aggregate_power / num_gpus if num_gpus > 0 else 0.0
+        else:
+            # Fallback to default if power column doesn't exist
+            power_per_gpu = 70.0
+
         dtype = common.CommQuantMode[dtype]
         try:
-            latency = nccl_data[dtype][op_name][num_gpus][message_size]
-            logger.debug('value conflict in nccl data: {} {} {} {} {}'.format(dtype, op_name, num_gpus, message_size,latency))            
+            existing = nccl_data[dtype][op_name][num_gpus][message_size]
+            logger.debug('value conflict in nccl data: {} {} {} {} {}'.format(dtype, op_name, num_gpus, message_size, latency))
         except KeyError:
-            nccl_data[dtype][op_name][num_gpus][message_size] = latency
+            nccl_data[dtype][op_name][num_gpus][message_size] = (latency, power_per_gpu)
 
     return nccl_data
 
@@ -941,53 +967,58 @@ class PerfDatabase(object):
 
         for quant_mode in self._context_attention_data.keys():
             for kv_cache_dtype in self._context_attention_data[quant_mode].keys():
-                for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
-                    for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]:
-                        for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][head_size]:
-                            data_dict=self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][head_size][window_size]
-                            min_x = min(data_dict.keys())
-                            target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
-                            # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
-                            target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
-                                [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
-                            target_z_list=[1,2,4,8,16,32,64,128,256,512,384,1024,2048] # b
+                for power_limit in self._context_attention_data[quant_mode][kv_cache_dtype]:
+                    for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype][power_limit]:
+                        for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][power_limit][num_kv_heads]:
+                            for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][power_limit][num_kv_heads][head_size]:
+                                data_dict=self._context_attention_data[quant_mode][kv_cache_dtype][power_limit][num_kv_heads][head_size][window_size]
+                                min_x = min(data_dict.keys())
+                                target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
+                                # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
+                                target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
+                                    [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
+                                target_z_list=[1,2,4,8,16,32,64,128,256,512,384,1024,2048] # b
 
+                                filtered_x_list = []
+                                for i in target_x_list:
+                                    if i >= min_x:
+                                        filtered_x_list.append(i)
+                                self._extrapolate_data_grid(data_dict=data_dict, #nsb
+                                                            target_x_list=filtered_x_list,
+                                                            target_y_list=target_y_list,
+                                                            target_z_list=target_z_list, sqrt_y_value=True)
+
+        for kv_cache_dtype in self._generation_attention_data.keys():
+            for power_limit in self._generation_attention_data[kv_cache_dtype]:
+                for num_kv_heads in self._generation_attention_data[kv_cache_dtype][power_limit]:
+                    for head_size in self._generation_attention_data[kv_cache_dtype][power_limit][num_kv_heads]:
+                        for window_size in self._generation_attention_data[kv_cache_dtype][power_limit][num_kv_heads][head_size]:
+                            target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
+                            target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
+                            target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
+                            data_dict = self._generation_attention_data[kv_cache_dtype][power_limit][num_kv_heads][head_size][window_size]
+                            min_x = min(data_dict.keys())
                             filtered_x_list = []
                             for i in target_x_list:
                                 if i >= min_x:
                                     filtered_x_list.append(i)
-                            self._extrapolate_data_grid(data_dict=data_dict, #nsb
+
+                            self._extrapolate_data_grid(data_dict=data_dict, #nbs
                                                         target_x_list=filtered_x_list,
                                                         target_y_list=target_y_list,
-                                                        target_z_list=target_z_list, sqrt_y_value=True)
+                                                        target_z_list=target_z_list)
 
-        for kv_cache_dtype in self._generation_attention_data.keys():
-            for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
-                for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
-                    for window_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size]:
-                        target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
-                        target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
-                        target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
-                        data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size][window_size]
-                        min_x = min(data_dict.keys())
-                        filtered_x_list = []
-                        for i in target_x_list:
-                            if i >= min_x:
-                                filtered_x_list.append(i)
-
-                        self._extrapolate_data_grid(data_dict=data_dict, #nbs
-                                                    target_x_list=filtered_x_list,
-                                                    target_y_list=target_y_list,
-                                                    target_z_list=target_z_list)
-
-        for quant_mode, data_dict in self._gemm_data.items():
-            target_x_list = [1,2,4,8,16,32,48,64,80,96,128,160,192,224,256,320,384,448,512,640,768,896,1024,2048,4096,8192,16384,32768,131072,524288,1048576,2097152*8] # num_tokens
-            target_y_list = [32,64,128,256,512,768,1024,1536,2048,2560,3072,3584,4096,5120,6144,7168,8192,10240,12288,14336,16384,20480,24576,28672,32768,40960,49152,57344,65536,131072,262144] # to fit vocab gemm
-            target_z_list = target_y_list
-            self._extrapolate_data_grid(data_dict=data_dict, 
-                                  target_x_list=target_x_list,
-                                  target_y_list=target_y_list,
-                                  target_z_list=target_z_list)
+        # GEMM data structure: [quant_mode][power_limit][m][n][k]
+        for quant_mode in self._gemm_data.keys():
+            for power_limit in self._gemm_data[quant_mode].keys():
+                data_dict = self._gemm_data[quant_mode][power_limit]
+                target_x_list = [1,2,4,8,16,32,48,64,80,96,128,160,192,224,256,320,384,448,512,640,768,896,1024,2048,4096,8192,16384,32768,131072,524288,1048576,2097152*8] # num_tokens
+                target_y_list = [32,64,128,256,512,768,1024,1536,2048,2560,3072,3584,4096,5120,6144,7168,8192,10240,12288,14336,16384,20480,24576,28672,32768,40960,49152,57344,65536,131072,262144] # to fit vocab gemm
+                target_z_list = target_y_list
+                self._extrapolate_data_grid(data_dict=data_dict,
+                                      target_x_list=target_x_list,
+                                      target_y_list=target_y_list,
+                                      target_z_list=target_z_list)
         
         # mla
         # For sglang backend, context_mla_data structure is [kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
@@ -1134,28 +1165,49 @@ class PerfDatabase(object):
             # y_direction
             for y in target_y_list:
                 if y not in data_dict[x].keys():
-                    y_left, y_right = self._nearest_1d_point_helper(y, list(data_dict[x].keys()), False)
+                    # Check if we have enough points to interpolate
+                    y_keys = list(data_dict[x].keys())
+                    if len(y_keys) < 2:
+                        logger.warning(f"Skipping interpolation for y={y} as x={x} has less than 2 y values")
+                        continue
+
+                    y_left, y_right = self._nearest_1d_point_helper(y, y_keys, False)
                     # Check if both left and right boundaries exist
                     if y_left not in data_dict[x].keys() or y_right not in data_dict[x].keys():
                         logger.warning(f"Skipping interpolation for y={y} as boundaries y_left={y_left} or y_right={y_right} do not exist in data_dict[{x}]")
                         continue
-                    
+
                     z_list = sorted(list(data_dict[x][y_left].keys()))
                     for z in z_list:
                         # Check if z exists in both y_left and y_right
                         if z not in data_dict[x][y_left].keys() or z not in data_dict[x][y_right].keys():
                             logger.warning(f"Skipping interpolation for z={z} as it does not exist in both y_left={y_left} and y_right={y_right}")
                             continue
-                            
+
                         y_left_value = data_dict[x][y_left][z]
                         y_right_value = data_dict[x][y_right][z]
                         assert(y_right_value is not None), "y_right_value cannot be None"
+
+                        # Handle tuple values for sqrt operation
                         if sqrt_y_value:
-                            y_left_value = math.sqrt(y_left_value)
-                            y_right_value = math.sqrt(y_right_value)
+                            if isinstance(y_left_value, tuple):
+                                lat_left, pow_left = y_left_value
+                                lat_right, pow_right = y_right_value
+                                y_left_value = (math.sqrt(lat_left), pow_left)
+                                y_right_value = (math.sqrt(lat_right), pow_right)
+                            else:
+                                y_left_value = math.sqrt(y_left_value)
+                                y_right_value = math.sqrt(y_right_value)
+
                         value = self._interp_1d([y_left, y_right], [y_left_value, y_right_value], y)
+
+                        # Square the result if needed
                         if sqrt_y_value:
-                            value = value*value
+                            if isinstance(value, tuple):
+                                lat, pow_val = value
+                                value = (lat * lat, pow_val)
+                            else:
+                                value = value * value
 
                         if y not in data_dict[x].keys():
                             data_dict[x][y] = {z:value}
@@ -1164,7 +1216,13 @@ class PerfDatabase(object):
 
         for x in target_x_list:
             if x not in data_dict.keys():
-                x_left, x_right = self._nearest_1d_point_helper(x, list(data_dict.keys()), False)
+                # Check if we have enough points to interpolate
+                x_keys = list(data_dict.keys())
+                if len(x_keys) < 2:
+                    logger.warning(f"Skipping interpolation for x={x} as data_dict has less than 2 x values")
+                    continue
+
+                x_left, x_right = self._nearest_1d_point_helper(x, x_keys, False)
                 # Check if both left and right boundaries exist
                 if x_left not in data_dict.keys() or x_right not in data_dict.keys():
                     logger.warning(f"Skipping interpolation for x={x} as boundaries x_left={x_left} or x_right={x_right} do not exist in data_dict")
@@ -1225,14 +1283,26 @@ class PerfDatabase(object):
     def _validate(self, value:float) -> float:
         """
         Validate the value
+        Handles both scalar values and (latency, power) tuples
         """
-        if value < 0.:
-            logger.debug(f'Negative value detected {value}, pass')
-        return value
+        if isinstance(value, tuple):
+            # Validate both components of the tuple
+            latency, power = value
+            if latency < 0.:
+                logger.debug(f'Negative latency detected {latency}, pass')
+            if power < 0.:
+                logger.debug(f'Negative power detected {power}, pass')
+            return value
+        else:
+            # Original scalar validation
+            if value < 0.:
+                logger.debug(f'Negative value detected {value}, pass')
+            return value
     
     def _interp_3d_linear(self, x:int, y:int, z:int, data:dict) -> float:
         """
         Interpolate the 3d data using linear interpolation
+        Handles both scalar values and (latency, power) tuples
         """
         points_list = []
         values_list = []
@@ -1245,12 +1315,24 @@ class PerfDatabase(object):
                 points_list.append([i, j, z_right])
                 values_list.append(data[i][j][z_left])
                 values_list.append(data[i][j][z_right])
-        
-        return self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (x,y,z), method='linear'))
+
+        # Check if values are tuples
+        if len(values_list) > 0 and isinstance(values_list[0], tuple):
+            # Separate latency and power for interpolation
+            latency_list = [v[0] for v in values_list]
+            power_list = [v[1] for v in values_list]
+
+            interp_latency = interpolate.griddata(np.array(points_list), np.array(latency_list), (x,y,z), method='linear')
+            interp_power = interpolate.griddata(np.array(points_list), np.array(power_list), (x,y,z), method='linear')
+
+            return self._validate((float(interp_latency), float(interp_power)))
+        else:
+            return self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (x,y,z), method='linear'))
 
     def _interp_2d_linear(self, x:int, y:int, data:dict) -> float:
         """
-        Interpolate the 3d data using linear interpolation
+        Interpolate the 2d data using linear interpolation
+        Handles both scalar values and (latency, power) tuples
         """
         points_list = []
         values_list = []
@@ -1260,8 +1342,19 @@ class PerfDatabase(object):
             for j in [y_left, y_right]:
                 points_list.append([i, j])
                 values_list.append(data[i][j])
-        
-        return self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (x,y), method='linear'))
+
+        # Check if values are tuples
+        if len(values_list) > 0 and isinstance(values_list[0], tuple):
+            # Separate latency and power for interpolation
+            latency_list = [v[0] for v in values_list]
+            power_list = [v[1] for v in values_list]
+
+            interp_latency = interpolate.griddata(np.array(points_list), np.array(latency_list), (x,y), method='linear')
+            interp_power = interpolate.griddata(np.array(points_list), np.array(power_list), (x,y), method='linear')
+
+            return self._validate((float(interp_latency), float(interp_power)))
+        else:
+            return self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (x,y), method='linear'))
 
     def _interp_3d(self, x:int, y:int, z:int, data:dict, method:str) -> float:
         """
@@ -1275,25 +1368,56 @@ class PerfDatabase(object):
     def _bilinear_interpolation(self, x_list : List[int], y_list : List[int], x : int, y : int, data : dict) -> float:
         """
         Interpolate the 2d data using bilinear interpolation
+        Handles both scalar values and (latency, power) tuples
         """
         x1, x2 = x_list
         # assure xy has a rectengle grid
         y1, y2 = y_list
         # Calculate the weights for the corners
         Q11,Q12,Q21,Q22 = data[x1][y1], data[x1][y2], data[x2][y1], data[x2][y2]
-        f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
-        f_x1_y2 = Q12 * (x2 - x) * (y - y1)
-        f_x2_y1 = Q21 * (x - x1) * (y2 - y)
-        f_x2_y2 = Q22 * (x - x1) * (y - y1)
-        # Calculate the total weight
-        total_weight = (x2 - x1) * (y2 - y1)
-        # Calculate the interpolated value
-        interpolated_value = (f_x1_y1 + f_x1_y2 + f_x2_y1 + f_x2_y2) / total_weight
-        return interpolated_value
+
+        # Check if values are tuples (latency, power)
+        if isinstance(Q11, tuple):
+            # Interpolate latency and power separately
+            latency_Q11, power_Q11 = Q11
+            latency_Q12, power_Q12 = Q12
+            latency_Q21, power_Q21 = Q21
+            latency_Q22, power_Q22 = Q22
+
+            # Calculate total weight
+            total_weight = (x2 - x1) * (y2 - y1)
+
+            # Interpolate latency
+            f_x1_y1_lat = latency_Q11 * (x2 - x) * (y2 - y)
+            f_x1_y2_lat = latency_Q12 * (x2 - x) * (y - y1)
+            f_x2_y1_lat = latency_Q21 * (x - x1) * (y2 - y)
+            f_x2_y2_lat = latency_Q22 * (x - x1) * (y - y1)
+            interp_latency = (f_x1_y1_lat + f_x1_y2_lat + f_x2_y1_lat + f_x2_y2_lat) / total_weight
+
+            # Interpolate power
+            f_x1_y1_pow = power_Q11 * (x2 - x) * (y2 - y)
+            f_x1_y2_pow = power_Q12 * (x2 - x) * (y - y1)
+            f_x2_y1_pow = power_Q21 * (x - x1) * (y2 - y)
+            f_x2_y2_pow = power_Q22 * (x - x1) * (y - y1)
+            interp_power = (f_x1_y1_pow + f_x1_y2_pow + f_x2_y1_pow + f_x2_y2_pow) / total_weight
+
+            return (interp_latency, interp_power)
+        else:
+            # Original scalar interpolation
+            f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
+            f_x1_y2 = Q12 * (x2 - x) * (y - y1)
+            f_x2_y1 = Q21 * (x - x1) * (y2 - y)
+            f_x2_y2 = Q22 * (x - x1) * (y - y1)
+            # Calculate the total weight
+            total_weight = (x2 - x1) * (y2 - y1)
+            # Calculate the interpolated value
+            interpolated_value = (f_x1_y1 + f_x1_y2 + f_x2_y1 + f_x2_y2) / total_weight
+            return interpolated_value
 
     def _interp_2d_1d(self, x:int, y:int, z:int, data:dict, method='bilinear') -> float:
         """
         Interpolate the 3d data using the given method, 2d after 1d.
+        Handles both scalar values and (latency, power) tuples
         """
         x_values = []
         x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
@@ -1309,7 +1433,15 @@ class PerfDatabase(object):
                 values_list.append(data[i][j][z_left])
                 values_list.append(data[i][j][z_right])
             if method == 'cubic':
-                x_values.append(self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (y,z), method='cubic')))
+                # Handle tuples for cubic interpolation
+                if len(values_list) > 0 and isinstance(values_list[0], tuple):
+                    latency_list = [v[0] for v in values_list]
+                    power_list = [v[1] for v in values_list]
+                    interp_latency = interpolate.griddata(np.array(points_list), np.array(latency_list), (y,z), method='cubic')
+                    interp_power = interpolate.griddata(np.array(points_list), np.array(power_list), (y,z), method='cubic')
+                    x_values.append(self._validate((float(interp_latency), float(interp_power))))
+                else:
+                    x_values.append(self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (y,z), method='cubic')))
             elif method == 'bilinear':
                 x_values.append(self._validate(self._bilinear_interpolation([y_left, y_right],[z_left, z_right],y,z,data[i])))
             else:
@@ -1320,16 +1452,43 @@ class PerfDatabase(object):
     def _interp_1d(self, x:List[int], y:List[int], value:int) -> float:
         """
         Interpolate the 1d data using linear interpolation
+        Handles both scalar values and (latency, power) tuples
         """
         x0,x1 = x
         y0,y1 = y
-        if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
-            y1 = y0
 
-        if y0 == y1:
-            return y0
+        # Check if y values are tuples (latency, power)
+        if isinstance(y0, tuple) and isinstance(y1, tuple):
+            # Interpolate latency and power separately
+            latency0, power0 = y0
+            latency1, power1 = y1
 
-        return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
+            # Interpolate latency
+            if (x0 - x1) * (latency0 - latency1) < 0 and (value - x0) * (value - x1) > 0:
+                latency1 = latency0
+            if latency0 == latency1:
+                interp_latency = latency0
+            else:
+                interp_latency = latency0 + (latency1 - latency0) / (x1 - x0) * (value - x0)
+
+            # Interpolate power
+            if (x0 - x1) * (power0 - power1) < 0 and (value - x0) * (value - x1) > 0:
+                power1 = power0
+            if power0 == power1:
+                interp_power = power0
+            else:
+                interp_power = power0 + (power1 - power0) / (x1 - x0) * (value - x0)
+
+            return (interp_latency, interp_power)
+        else:
+            # Original scalar interpolation
+            if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
+                y1 = y0
+
+            if y0 == y1:
+                return y0
+
+            return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
 
     def set_default_sol_mode(self, mode:common.SOLMode) -> None:
         """
@@ -1736,20 +1895,23 @@ class PerfDatabase(object):
             return latency
         
     # to simplify, we no longer support allreduce_strategy
-    def query_allreduce(self, 
-                        quant_mode : common.CommQuantMode, 
-                        tp_size : int, 
-                        size : int, 
-                        sol_mode : Optional[common.SOLMode] = None) -> float:
+    def query_allreduce(self,
+                        quant_mode : common.CommQuantMode,
+                        tp_size : int,
+                        size : int,
+                        sol_mode : Optional[common.SOLMode] = None) -> Tuple[float, float]:
         """
         Query the allreduce data
+
+        Returns:
+            Tuple[float, float]: (latency_ms, power_per_gpu_watts)
         """
         def get_sol(quant_mode : common.CommQuantMode, tp_size : int, size : int) -> Tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
             if tp_size == 1:
-                return 0,0,0            
+                return 0,0,0
             # count, not size in bytes
             p2pBW = self.system_spec['node']['inter_node_bw'] if tp_size > self.system_spec['node']['num_gpus_per_node'] else self.system_spec['node']['intra_node_bw']
 
@@ -1757,35 +1919,48 @@ class PerfDatabase(object):
             # assume float16
             sol_time = 2*size*2/tp_size*(tp_size-1)/p2pBW
             return sol_time*1000,0,0
-        
+
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(quant_mode, tp_size, size)[0]
+            return (get_sol(quant_mode, tp_size, size)[0], 70.0)  # Default power for SOL mode
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(quant_mode, tp_size, size)
+            sol_result = get_sol(quant_mode, tp_size, size)
+            return (sol_result[0], 70.0)  # Default power for SOL mode
         else:
             if tp_size == 1:
-                return 0.
+                return (0.0, 0.0)
             comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size,8)]['AUTO'] # use AUTO for allreduce strategy
             size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
-            lat = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+
+            # Extract latency and power separately for interpolation
+            lat_left, pow_left = comm_dict[size_left]
+            lat_right, pow_right = comm_dict[size_right]
+
+            lat = self._interp_1d([size_left, size_right], [lat_left, lat_right], size)
+            power = self._interp_1d([size_left, size_right], [pow_left, pow_right], size)
+
             if tp_size > 8: # FIXME, to collect real data, use inter-node and intra-node data seperately
                 if tp_size > self.system_spec['node']['num_gpus_per_node']:
                     lat = lat * (tp_size-1)/tp_size * 8/7 * self.system_spec['node']['intra_node_bw'] / self.system_spec['node']['inter_node_bw']
                 else:
                     lat = lat * (tp_size-1)/tp_size * 8/7
-            return lat
+                # Power per GPU should remain the same regardless of scaling
+
+            return (lat, power)
     
-    def query_nccl(self, dtype : common.CommQuantMode, 
-                   num_gpus : int, 
-                   operation : str, 
+    def query_nccl(self, dtype : common.CommQuantMode,
+                   num_gpus : int,
+                   operation : str,
                    message_size : int, # element number
-                   sol_mode : Optional[common.SOLMode] = None) -> float:
+                   sol_mode : Optional[common.SOLMode] = None) -> Tuple[float, float]:
         """
         Query the nccl data
 
         message_size: element number
+
+        Returns:
+            Tuple[float, float]: (latency_ms, power_per_gpu_watts)
         """
         def get_sol(dtype : common.CommQuantMode, num_gpus : int, operation : str, message_size : int) -> Tuple[float, float, float]:
             """
@@ -1804,21 +1979,28 @@ class PerfDatabase(object):
             elif operation == 'all_reduce':
                 sol_time = 2 * dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
             return sol_time, 0, sol_time
-            
+
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(dtype, num_gpus, operation, message_size)[0]
+            return (get_sol(dtype, num_gpus, operation, message_size)[0], 70.0)  # Default power for SOL mode
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(dtype, num_gpus, operation, message_size)
+            sol_result = get_sol(dtype, num_gpus, operation, message_size)
+            return (sol_result[0], 70.0)  # Default power for SOL mode
         else:
             if num_gpus == 1:
-                return 0.
+                return (0.0, 0.0)
 
         max_num_gpus = max(self._nccl_data[dtype][operation].keys())
         nccl_dict = self._nccl_data[dtype][operation][min(num_gpus,max_num_gpus)]
         size_left, size_right = self._nearest_1d_point_helper(message_size, list(nccl_dict.keys()), inner_only=False)
-        lat = self._interp_1d([size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size)
+
+        # Extract latency and power separately for interpolation
+        lat_left, pow_left = nccl_dict[size_left]
+        lat_right, pow_right = nccl_dict[size_right]
+
+        lat = self._interp_1d([size_left, size_right], [lat_left, lat_right], message_size)
+        power = self._interp_1d([size_left, size_right], [pow_left, pow_right], message_size)
 
         if num_gpus > max_num_gpus: # need to do some correction
             logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
@@ -1829,8 +2011,9 @@ class PerfDatabase(object):
             else: # all intra node
                 scale_factor = 1
             lat = lat * (num_gpus-1) / num_gpus * max_num_gpus / (max_num_gpus-1) * scale_factor
+            # Power per GPU should remain the same regardless of scaling
 
-        return lat
+        return (lat, power)
     
     def query_moe(self, 
                   num_tokens : int, 
@@ -1977,11 +2160,14 @@ class PerfDatabase(object):
             lat = (mem_bytes / (self.system_spec['gpu']['mem_bw'] * self.system_spec['gpu']['mem_bw_empirical_scaling_factor']) + self.system_spec['gpu']['mem_empirical_constant_latency']) * 1000
             return lat
     
-    def query_p2p(self, 
-                  message_bytes : int, 
-                  sol_mode : Optional[common.SOLMode] = None) -> float:
+    def query_p2p(self,
+                  message_bytes : int,
+                  sol_mode : Optional[common.SOLMode] = None) -> Tuple[float, float]:
         """
         Query the p2p data
+
+        Returns:
+            Tuple[float, float]: (latency_ms, power_per_gpu_watts)
         """
         def get_sol(message_bytes : int) -> Tuple[float, float, float]:
             """
@@ -1993,42 +2179,50 @@ class PerfDatabase(object):
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(message_bytes)[0]
+            return (get_sol(message_bytes)[0], 70.0)  # Default power for P2P
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(message_bytes)
+            sol_result = get_sol(message_bytes)
+            return (sol_result[0], 70.0)  # Default power for P2P
         else:
-            return (message_bytes / self.system_spec['node']['inter_node_bw'] + self.system_spec['node']['p2p_latency']) * 1000
+            latency = (message_bytes / self.system_spec['node']['inter_node_bw'] + self.system_spec['node']['p2p_latency']) * 1000
+            return (latency, 70.0)  # Default power for P2P
         
     def _correct_data(self) -> None:
         """
         Correct the data based on sol time reference.
         """
         # correct gemm
+        # Schema: gemm_data[quant_mode][power_limit][m][n][k] = (latency, power)
         for quant_mode in self._gemm_data.keys():
-            for m in self._gemm_data[quant_mode].keys():
-                for n in self._gemm_data[quant_mode][m].keys():
-                    for k in self._gemm_data[quant_mode][m][n].keys():
-                        sol = self.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL)
-                        if sol > self._gemm_data[quant_mode][m][n][k]:
-                            logger.debug('gemm quant {} m{} n{} k{}: sol {} > perf_db {}'.format(quant_mode, m, n, k, sol, self._gemm_data[quant_mode][m][n][k]))
-                            self._gemm_data[quant_mode][m][n][k] = max(sol, self._gemm_data[quant_mode][m][n][k])
-        
+            for power_limit in self._gemm_data[quant_mode].keys():
+                for m in self._gemm_data[quant_mode][power_limit].keys():
+                    for n in self._gemm_data[quant_mode][power_limit][m].keys():
+                        for k in self._gemm_data[quant_mode][power_limit][m][n].keys():
+                            sol = self.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL, power_limit=power_limit)
+                            current_latency, current_power = self._gemm_data[quant_mode][power_limit][m][n][k]
+                            if sol > current_latency:
+                                logger.debug('gemm quant {} {}W m{} n{} k{}: sol {} > perf_db {}'.format(quant_mode, power_limit, m, n, k, sol, current_latency))
+                                self._gemm_data[quant_mode][power_limit][m][n][k] = (max(sol, current_latency), current_power)
+
         # correct generation attention
-        for quant_mode in self._generation_attention_data.keys():
-            for n_kv in self._generation_attention_data[quant_mode].keys():
-                for head_size in self._generation_attention_data[quant_mode][n_kv].keys():
-                    for window_size in self._generation_attention_data[quant_mode][n_kv][head_size].keys():
-                        for n in self._generation_attention_data[quant_mode][n_kv][head_size][window_size].keys():
-                            for b in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n].keys():
-                                for s in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b].keys():
-                                    if n_kv == 0:
-                                        n_kv_local = n
-                                    else:
-                                        n_kv_local = n_kv
-                                    sol = self.query_generation_attention(b, s, n, n_kv_local, quant_mode, sol_mode=common.SOLMode.SOL, window_size=window_size, head_size=head_size)
-                                    if sol > self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][s]:
-                                        logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, window_size, sol, self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][s]))
-                                        self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][s] = sol
+        # Schema: [kv_cache_dtype][power_limit][kv_n][head_size][window_size][n][b][s] = (latency, power)
+        for kv_cache_dtype in self._generation_attention_data.keys():
+            for power_limit in self._generation_attention_data[kv_cache_dtype].keys():
+                for n_kv in self._generation_attention_data[kv_cache_dtype][power_limit].keys():
+                    for head_size in self._generation_attention_data[kv_cache_dtype][power_limit][n_kv].keys():
+                        for window_size in self._generation_attention_data[kv_cache_dtype][power_limit][n_kv][head_size].keys():
+                            for n in self._generation_attention_data[kv_cache_dtype][power_limit][n_kv][head_size][window_size].keys():
+                                for b in self._generation_attention_data[kv_cache_dtype][power_limit][n_kv][head_size][window_size][n].keys():
+                                    for s in self._generation_attention_data[kv_cache_dtype][power_limit][n_kv][head_size][window_size][n][b].keys():
+                                        if n_kv == 0:
+                                            n_kv_local = n
+                                        else:
+                                            n_kv_local = n_kv
+                                        sol = self.query_generation_attention(b, s, n, n_kv_local, kv_cache_dtype, sol_mode=common.SOLMode.SOL, window_size=window_size, head_size=head_size, power_limit=power_limit)
+                                        current_latency, current_power = self._generation_attention_data[kv_cache_dtype][power_limit][n_kv][head_size][window_size][n][b][s]
+                                        if sol > current_latency:
+                                            logger.debug('generation attention kv_cache_dtype {} {}W n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(kv_cache_dtype, power_limit, n, n_kv_local, b, s, sol, current_latency))
+                                            self._generation_attention_data[kv_cache_dtype][power_limit][n_kv][head_size][window_size][n][b][s] = (sol, current_power)
                 
     def query_mlp(self, 
                   num_tokens: int,

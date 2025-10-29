@@ -138,17 +138,58 @@ def log_final_summary(
         summary_box.append(f"    - User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
+
+        # Display power information if available
+        if 'total_cluster_power' in best_conf_details and best_conf_details['total_cluster_power'] > 0:
+            summary_box.append(f"    - Total Cluster Power: {best_conf_details['total_cluster_power']:.1f}W")
+            if 'power' in best_conf_details and best_conf_details['power'] > 0:
+                summary_box.append(f"    - Per-GPU Power: {best_conf_details['power']:.1f}W")
+
+        # Display power budget status if applicable
+        if 'within_power_budget' in best_conf_details:
+            budget_status = "✓ Within" if best_conf_details['within_power_budget'] else "✗ Over"
+            summary_box.append(f"    - Power Budget Status: {budget_status}")
     summary_box.append("  " + "-" * 76)
 
     # ============================= pareto frontier
     pareto_plot_buf = ""
     if len(pareto_fronts) <= 10:  # avoid overly crowded plots
         summary_box.append("  Pareto Frontier:")
-        series_payload = [
-            {"df": df, "label": name}
-            for name, df in pareto_fronts.items()
-            if df is not None and not df.empty
-        ]
+
+        # Display power budget if set
+        cluster_power_budget = getattr(task_configs[chosen_exp], 'cluster_power_budget', None)
+        if cluster_power_budget is not None:
+            summary_box.append(f"    Power Budget Constraint: {cluster_power_budget}W total cluster power")
+
+        series_payload = []
+
+        # Build series, splitting by power budget if applicable
+        for name, df in pareto_fronts.items():
+            if df is None or df.empty:
+                continue
+
+            # Check if power budget filtering is enabled
+            if 'within_power_budget' in df.columns and df['within_power_budget'].notna().any():
+                # Split into within budget (green) and over budget (red)
+                within_df = df[df['within_power_budget'] == True]
+                over_df = df[df['within_power_budget'] == False]
+
+                if not within_df.empty:
+                    series_payload.append({
+                        "df": within_df,
+                        "label": f"{name} (within budget)",
+                        "color": (144, 238, 144),  # light green
+                    })
+                if not over_df.empty:
+                    series_payload.append({
+                        "df": over_df,
+                        "label": f"{name} (over budget)",
+                        "color": (255, 99, 71),  # tomato red
+                    })
+            else:
+                # No power budget - plot normally
+                series_payload.append({"df": df, "label": name})
+
         highlight_series = None
         if not best_config_df.empty:
             highlight_series = {

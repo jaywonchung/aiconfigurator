@@ -40,10 +40,8 @@ class AllReduce(Operation):
         # count, not size in bytes
         size = kwargs.get('x') * self._h
 
-        latency = database.query_allreduce(common.CommQuantMode.half, self._tp_size, size) * self._scale_factor
-
-        # Communication operations use a default power draw of 70W regardless of power limit
-        power = 70.0
+        latency, power = database.query_allreduce(common.CommQuantMode.half, self._tp_size, size)
+        latency = latency * self._scale_factor
 
         return (latency, power)
 
@@ -69,10 +67,7 @@ class P2P(Operation):
         size = kwargs.get('x') * self._h
         p2p_bytes = size * 2
 
-        latency = database.query_p2p(p2p_bytes)
-
-        # Communication operations use a default power draw of 70W regardless of power limit
-        power = 70.0
+        latency, power = database.query_p2p(p2p_bytes)
 
         return (latency * self._scale_factor, power)
 
@@ -94,10 +89,7 @@ class NCCL(Operation):
     def query(self, database:PerfDatabase, **kwargs) -> Tuple[float, float]:
         message_size = kwargs.get('x') * self._num_elements_per_token
 
-        latency = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
-
-        # Communication operations use a default power draw of 70W regardless of power limit
-        power = 70.0
+        latency, power = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
 
         return (latency * self._scale_factor, power)
 

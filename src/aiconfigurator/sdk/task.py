@@ -1029,12 +1029,14 @@ class TaskRunner:
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
         except Exception as e:
+            import traceback
             logger.error(
                 "Error running pareto analysis for %s in %s mode: %s",
                 task_config.task_name,
                 serving_mode,
                 e,
             )
+            logger.error("Full traceback:\n%s", traceback.format_exc())
             result = None
 
         if result is None:

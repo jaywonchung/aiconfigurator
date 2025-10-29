@@ -141,6 +141,12 @@ def agg_pareto(model_name: str,
 
     results_df = results_df.sort_values(by='tokens/s/gpu', ascending=False).reset_index(drop=True)
 
+    # Add power budget constraint column if budget is specified
+    if cluster_power_budget is not None and len(results_df) > 0:
+        results_df['within_power_budget'] = results_df['total_cluster_power'] <= cluster_power_budget
+        logger.info(f"Power budget constraint: {cluster_power_budget}W")
+        logger.info(f"Configurations within budget: {results_df['within_power_budget'].sum()}/{len(results_df)}")
+
     return results_df
 
 def disagg_pareto(model_name: str,
@@ -278,6 +284,12 @@ def disagg_pareto(model_name: str,
     if len(all_results) == 0:
         return pd.DataFrame()  # Return empty DataFrame if no results
     combined_df = pd.concat(all_results, axis=0, ignore_index=True)
+
+    # Add power budget constraint column if budget is specified
+    if cluster_power_budget is not None and len(combined_df) > 0:
+        combined_df['within_power_budget'] = combined_df['total_cluster_power'] <= cluster_power_budget
+        logger.info(f"Power budget constraint: {cluster_power_budget}W")
+        logger.info(f"Configurations within budget: {combined_df['within_power_budget'].sum()}/{len(combined_df)}")
 
     return combined_df
 

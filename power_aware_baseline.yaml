@@ -1,0 +1,118 @@
+# ============================================================================
+# Power-Aware Configuration Baseline for AIConfigurator
+# ============================================================================
+# This configuration demonstrates power-aware planning capabilities including:
+# - GPU power limit exploration (per-GPU power capping)
+# - Cluster power budget constraints (total datacenter power)
+# - Power-optimal configuration selection
+# - Power consumption visualization on Pareto frontiers
+# ============================================================================
+
+# Define experiments to run (order determines execution)
+exps:
+  - exp_power_sweep_agg
+  - exp_power_constrained_agg
+  - exp_power_sweep_disagg
+  - exp_power_constrained_disagg
+
+# ============================================================================
+# Aggregated Mode: GPU Power Limit Sweep
+# ============================================================================
+# Explores multiple GPU power limits to find power-performance trade-offs
+exp_power_sweep_agg:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 8
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  # Workload characteristics
+  isl: 4000  # Input sequence length
+  osl: 1000  # Output sequence length
+  ttft: 1000.0  # Target Time-to-First-Token (ms)
+  tpot: 40.0   # Target Time-per-Output-Token (ms)
+
+  # Power configuration: Explore multiple power limits
+  # These are PER-GPU power limits in Watts
+  # Example for H100: [400, 500, 600, 700]W
+  power_limits: [500, 600, 700]
+
+  # Optional: Set cluster power budget for filtering/visualization
+  # Total power budget in Watts (e.g., 8 GPUs × 600W = 4800W)
+  cluster_power_budget: 4800.0
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1, 2, 4, 8]
+
+# ============================================================================
+# Disaggregated Mode: Power Limit Sweep for Prefill & Decode
+# ============================================================================
+# Explores different power limits for prefill vs decode workers
+exp_power_sweep_disagg:
+  mode: "patch"
+  serving_mode: "disagg"
+  model_name: "LLAMA3.1_70B"  # Larger model for disaggregated serving
+  total_gpus: 32
+  system_name: "h100_sxm"
+  decode_system_name: "h100_sxm"  # Can use different system for decode
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 40.0
+
+  # Power limits for prefill workers (compute-intensive)
+  prefill_power_limits: [500, 600, 700]
+
+  # Power limits for decode workers (can run at lower power)
+  decode_power_limits: [500, 600, 700]
+
+  # Optional: Total cluster power budget
+  cluster_power_budget: 16000.0  # 32 GPUs × 500W avg = 16kW
+
+  config:
+    prefill_worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      num_gpu_per_worker: [4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1]
+
+    decode_worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      num_gpu_per_worker: [4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1, 2, 4, 8]
+
+    replica_config:
+      num_gpu_per_replica: [8, 16, 24, 32]
+      max_gpu_per_replica: 32
+      max_prefill_worker: 8
+      max_decode_worker: 16
+
+    advanced_tuning_config:
+      prefill_latency_correction_scale: 1.1
+      decode_latency_correction_scale: 1.08
+      prefill_max_batch_size: 1
+      decode_max_batch_size: 512
+
