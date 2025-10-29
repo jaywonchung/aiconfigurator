@@ -48,7 +48,7 @@ def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus:
     is_disagg = '(p)tp' in top_configs.columns
 
     if is_disagg:
-        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "TPOT", "concurrency", "total_gpus(used)", "replicas", "gpus/replica",
+        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "tokens/s/W", "TTFT", "TPOT", "concurrency", "total_gpus(used)", "replicas", "gpus/replica",
                              "(p)workers", "(p)gpus/worker", "(p)parallel", "(p)bs", "(p)power_limit", "(p)power/GPU",
                              "(d)workers", "(d)gpus/worker", "(d)parallel", "(d)bs", "(d)power_limit", "(d)power/GPU",
                              "cluster_power"]
@@ -70,8 +70,12 @@ def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus:
             d_power = f"{row['(d)power']:.1f}W" if '(d)power' in row and row['(d)power'] > 0 else "N/A"
             cluster_power = f"{row['total_cluster_power'] * row['replicas']:.1f}W" if 'total_cluster_power' in row and row['total_cluster_power'] > 0 else "N/A"
 
+            # Calculate tokens/s/W (energy efficiency)
+            tokens_per_watt = (row['tokens/s'] * row['replicas']) / (row['total_cluster_power'] * row['replicas']) if row['total_cluster_power'] > 0 else 0
+            tokens_per_watt_str = f"{tokens_per_watt:.2f}"
+
             table.add_row([
-                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}", f"{row['tpot']:.2f}",
+                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", tokens_per_watt_str, f"{row['ttft']:.2f}", f"{row['tpot']:.2f}",
                 f"{row['concurrency']*row['replicas']}(={row['concurrency']}x{row['replicas']})",
                 f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})", row['replicas'],
                 f"{row['num_total_gpus']} (={row['(p)workers']}x{row['(p)pp']*row['(p)tp']*row['(p)dp']}+{row['(d)workers']}x{row['(d)pp']*row['(d)tp']*row['(d)dp']})",
@@ -80,7 +84,7 @@ def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus:
                 cluster_power,
             ])
     else: # agg
-        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "TPOT", "concurrency", "total_gpus(used)",
+        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "tokens/s/W", "TTFT", "TPOT", "concurrency", "total_gpus(used)",
                              "replicas", "gpus/replica", "gpus/worker", "parallel", "bs", "power_limit", "power/GPU", "cluster_power"]
         for i, row in enumerate(top_configs.to_dict('records')):
             if is_moe:
@@ -94,8 +98,12 @@ def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus:
             per_gpu_power = f"{row['power']:.1f}W" if 'power' in row and row['power'] > 0 else "N/A"
             cluster_power = f"{row['total_cluster_power'] * row['replicas']:.1f}W" if 'total_cluster_power' in row and row['total_cluster_power'] > 0 else "N/A"
 
+            # Calculate tokens/s/W (energy efficiency)
+            tokens_per_watt = (row['tokens/s'] * row['replicas']) / (row['total_cluster_power'] * row['replicas']) if row['total_cluster_power'] > 0 else 0
+            tokens_per_watt_str = f"{tokens_per_watt:.2f}"
+
             table.add_row([
-                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}", f"{row['tpot']:.2f}",
+                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", tokens_per_watt_str, f"{row['ttft']:.2f}", f"{row['tpot']:.2f}",
                 f"{row['concurrency']*row['replicas']}(={row['concurrency']}x{row['replicas']})", f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                 row['replicas'], row['num_total_gpus'],
                 gpus_worker, parallel, row['bs'], power_limit, per_gpu_power, cluster_power
@@ -212,11 +220,95 @@ def log_final_summary(
                 "label": f"{chosen_exp} best",
             }
         pareto_plot_buf = draw_pareto_to_string(
-            f"{task_configs[chosen_exp].config.model_name} Pareto Frontier",
+            f"{task_configs[chosen_exp].config.model_name} Pareto Frontier: tokens/s/gpu vs tokens/s/user",
             series_payload,
             highlight=highlight_series,
         )
         summary_box.append(pareto_plot_buf)
+
+        # Second plot: tokens/s/power vs tokens/s/user
+        series_payload_power = []
+        for name, df in pareto_fronts.items():
+            if df is None or df.empty:
+                continue
+
+            # Calculate tokens/s/power (energy efficiency)
+            df_copy = df.copy()
+            # For disagg, use total cluster power considering replicas
+            if '(p)tp' in df_copy.columns:  # disagg mode
+                # Need to get replicas count
+                total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
+                df_copy['replicas'] = total_gpus // df_copy['num_total_gpus']
+                df_copy['actual_cluster_power'] = df_copy['total_cluster_power'] * df_copy['replicas']
+            else:  # agg mode
+                total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
+                df_copy['replicas'] = total_gpus // df_copy['num_total_gpus']
+                df_copy['actual_cluster_power'] = df_copy['total_cluster_power'] * df_copy['replicas']
+
+            # Calculate tokens/s/W (total cluster throughput / total cluster power)
+            df_copy['tokens/s/power'] = (df_copy['tokens/s'] * df_copy['replicas']) / df_copy['actual_cluster_power']
+
+            # Check if power budget filtering is enabled
+            if 'within_power_budget' in df_copy.columns and df_copy['within_power_budget'].notna().any():
+                within_df = df_copy[df_copy['within_power_budget'] == True]
+                over_df = df_copy[df_copy['within_power_budget'] == False]
+
+                if not within_df.empty:
+                    series_payload_power.append({
+                        "df": within_df,
+                        "label": f"{name} (within budget)",
+                        "color": (144, 238, 144),
+                    })
+                if not over_df.empty:
+                    series_payload_power.append({
+                        "df": over_df,
+                        "label": f"{name} (over budget)",
+                        "color": (255, 99, 71),
+                    })
+            else:
+                series_payload_power.append({"df": df_copy, "label": name})
+
+        # Find the configuration with the best tokens/s/power (energy efficiency)
+        # IMPORTANT: Only consider configs that meet TPOT constraint
+        highlight_series_power = None
+        best_power_efficiency_exp = None
+        best_power_efficiency_value = 0
+        best_power_efficiency_df = None
+
+        for name, df in pareto_fronts.items():
+            if df is None or df.empty:
+                continue
+
+            df_copy = df.copy()
+            total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
+            df_copy['replicas'] = total_gpus // df_copy['num_total_gpus']
+            df_copy['actual_cluster_power'] = df_copy['total_cluster_power'] * df_copy['replicas']
+            df_copy['tokens/s/power'] = (df_copy['tokens/s'] * df_copy['replicas']) / df_copy['actual_cluster_power']
+
+            # Filter by TPOT constraint first (same logic as regular "best" selection)
+            tpot_target = task_configs[name].config.runtime_config.tpot
+            df_filtered = df_copy[df_copy['tpot'] <= tpot_target]
+
+            # Find max tokens/s/power among configs meeting TPOT constraint
+            if not df_filtered.empty and df_filtered['tokens/s/power'].max() > best_power_efficiency_value:
+                best_power_efficiency_value = df_filtered['tokens/s/power'].max()
+                best_power_efficiency_df = df_filtered[df_filtered['tokens/s/power'] == df_filtered['tokens/s/power'].max()]
+                best_power_efficiency_exp = name
+
+        if best_power_efficiency_df is not None and not best_power_efficiency_df.empty:
+            highlight_series_power = {
+                "df": best_power_efficiency_df.head(1),
+                "label": f"{best_power_efficiency_exp} best (energy efficiency)",
+            }
+
+        pareto_plot_buf_power = draw_pareto_to_string(
+            f"{task_configs[chosen_exp].config.model_name} Pareto Frontier: tokens/s/W vs tokens/s/user",
+            series_payload_power,
+            highlight=highlight_series_power,
+            x_col='tokens/s/user',
+            y_col='tokens/s/power',
+        )
+        summary_box.append(pareto_plot_buf_power)
     summary_box.append("  " + "-" * 76)
 
     # ============================= deployment details

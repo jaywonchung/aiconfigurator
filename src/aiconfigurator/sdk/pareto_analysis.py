@@ -337,6 +337,8 @@ def draw_pareto_to_string(
     series: list[dict],
     *,
     highlight: Optional[dict] = None,
+    x_col: str = 'tokens/s/user',
+    y_col: str = 'tokens/s/gpu',
 ) -> str:
     """Render one or more Pareto series as ASCII plot text.
 
@@ -349,6 +351,8 @@ def draw_pareto_to_string(
             - "marker": plotext marker (default: "dot").
         highlight: Optional dictionary describing a highlighted point set. Accepts
             keys "df", "label", "color", "marker" similar to ``series``.
+        x_col: Column name for x-axis (default: 'tokens/s/user')
+        y_col: Column name for y-axis (default: 'tokens/s/gpu')
     """
 
     plotext.plot_size(80, 30)
@@ -375,14 +379,14 @@ def draw_pareto_to_string(
         marker = entry.get("marker") or markers[idx % len(markers)]
         label = entry.get("label") or f"series-{idx+1}"
         plotext.plot(
-            df['tokens/s/user'],
-            df['tokens/s/gpu'],
+            df[x_col],
+            df[y_col],
             label=label,
             color=color,
             marker=marker,
         )
-        y_max = max(df['tokens/s/gpu'].max(), y_max)
-        x_max = max(df['tokens/s/user'].max(), x_max)
+        y_max = max(df[y_col].max(), y_max)
+        x_max = max(df[x_col].max(), x_max)
 
     if highlight is not None:
         highlight_df = highlight.get("df")
@@ -391,22 +395,34 @@ def draw_pareto_to_string(
             marker = highlight.get("marker") or "x"
             label = highlight.get("label") or "Best"
             plotext.plot(
-                highlight_df['tokens/s/user'],
-                highlight_df['tokens/s/gpu'],
+                highlight_df[x_col],
+                highlight_df[y_col],
                 label=label,
                 color=color,
                 marker=marker,
             )
-            y_max = max(highlight_df['tokens/s/gpu'].max(), y_max)
-            x_max = max(highlight_df['tokens/s/user'].max(), x_max)
+            y_max = max(highlight_df[y_col].max(), y_max)
+            x_max = max(highlight_df[x_col].max(), x_max)
 
-    plotext.title(f"{title}: tokens/s/gpu vs tokens/s/user")
-    plotext.xlabel("tokens/s/user")
-    plotext.ylabel("tokens/s/gpu")
+    plotext.title(title)
+    plotext.xlabel(x_col)
+    plotext.ylabel(y_col)
     plotext.grid(False)
 
     if y_max > 0.0 and x_max > 0.0:
-        y_max = ((y_max * 1.2) + 49) // 50 * 50
+        # Better scaling logic based on data range
+        if y_max >= 10:
+            # For larger values (like tokens/s/gpu), round to nearest 50
+            y_max = ((y_max * 1.2) + 49) // 50 * 50
+        elif y_max >= 1:
+            # For medium values, round to nearest 1
+            y_max = ((y_max * 1.2) + 0.99) // 1.0 * 1.0
+        else:
+            # For small values (like tokens/s/W), use finer granularity
+            y_max = y_max * 1.2
+            # Round to 2 decimal places
+            y_max = round(y_max, 2)
+
         x_max = ((x_max * 1.1) + 19) // 20 * 20
         x_max = min(x_max, 300)
         plotext.ylim(0.0, y_max)

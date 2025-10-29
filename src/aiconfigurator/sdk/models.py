@@ -137,28 +137,29 @@ class GPTModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        power_limit = self.config.power_limit
 
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size + self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode), 
-                                ops.ContextAttention(f'context_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
-                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size + self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.ContextAttention(f'context_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'context_ffn1_gemm', self._num_layers, self._inter_size//tp_size, h, gemm_quant_mode),
+                                ops.GEMM(f'context_ffn1_gemm', self._num_layers, self._inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'context_act', self._num_layers, self._inter_size//tp_size, self._inter_size//tp_size, 0.8),
-                                ops.GEMM(f'context_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode),
-                                ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+                                ops.GEMM(f'context_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
 
         self.generation_ops.extend([ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'generation_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode), 
-                                ops.GenerationAttention(f'generation_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode),
-                                ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.GenerationAttention(f'generation_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'generation_ffn1_gemm', self._num_layers, self._inter_size//tp_size, h, gemm_quant_mode),
+                                ops.GEMM(f'generation_ffn1_gemm', self._num_layers, self._inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'generation_act', self._num_layers, self._inter_size//tp_size, self._inter_size//tp_size, 0.8),
-                                ops.GEMM(f'generation_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode),
-                                ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+                                ops.GEMM(f'generation_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
         
         # when tp_size=0, the comm part will be 0
         self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
@@ -189,29 +190,30 @@ class LLAMAModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        power_limit = self.config.power_limit
 
 
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode), 
-                                ops.ContextAttention(f'context_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
-                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.ContextAttention(f'context_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'context_gate_ffn1_gemm', self._num_layers, 2*self._inter_size//tp_size, h, gemm_quant_mode),
+                                ops.GEMM(f'context_gate_ffn1_gemm', self._num_layers, 2*self._inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'context_act_gate', self._num_layers, 2*self._inter_size//tp_size, self._inter_size//tp_size, 0.8),
-                                ops.GEMM(f'context_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode),
-                                ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+                                ops.GEMM(f'context_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
 
         self.generation_ops.extend([ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'generation_add_nrom_1', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode), 
-                                ops.GenerationAttention(f'generation_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode),
-                                ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.GenerationAttention(f'generation_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'generation_gate_ffn1_gemm', self._num_layers, 2*self._inter_size//tp_size, h, gemm_quant_mode),
+                                ops.GEMM(f'generation_gate_ffn1_gemm', self._num_layers, 2*self._inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'generation_act_gate', self._num_layers, 2*self._inter_size//tp_size, self._inter_size//tp_size, 0.8),
-                                ops.GEMM(f'generation_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode),
-                                ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+                                ops.GEMM(f'generation_ffn2_gemm', self._num_layers, h, self._inter_size//tp_size, gemm_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
         
         # when tp_message_size=0, the comm part will be 0
         self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
@@ -264,75 +266,78 @@ class MOEModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        power_limit = self.config.power_limit
         workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
 
         if self.model_name in ['GPT_OSS_120B','GPT_OSS_20B']:
             attn_scale_factor = 2
             window_size = 128
-            self.context_ops.append(ops.ContextAttention(f'context_attention', 
-                                                         self._num_layers/attn_scale_factor, 
-                                                         self._num_heads//tp_size, 
-                                                         num_kv_heads_per_GPU, 
-                                                         kvcache_quant_mode, 
+            self.context_ops.append(ops.ContextAttention(f'context_attention',
+                                                         self._num_layers/attn_scale_factor,
+                                                         self._num_heads//tp_size,
+                                                         num_kv_heads_per_GPU,
+                                                         kvcache_quant_mode,
                                                          fmha_quant_mode,
                                                          window_size,
-                                                         self._head_size))
-            self.generation_ops.append(ops.GenerationAttention(f'generation_attention', 
-                                                               self._num_layers/attn_scale_factor, 
-                                                               self._num_heads//tp_size, 
-                                                               num_kv_heads_per_GPU, 
+                                                         self._head_size,
+                                                         power_limit=power_limit))
+            self.generation_ops.append(ops.GenerationAttention(f'generation_attention',
+                                                               self._num_layers/attn_scale_factor,
+                                                               self._num_heads//tp_size,
+                                                               num_kv_heads_per_GPU,
                                                                kvcache_quant_mode,
                                                                window_size,
-                                                               self._head_size))
+                                                               self._head_size,
+                                                               power_limit=power_limit))
         else:
             attn_scale_factor = 1
 
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
-                                ops.ContextAttention(f'context_attention', self._num_layers/attn_scale_factor, 
-                                                     self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, 
-                                                     fmha_quant_mode, head_size=self._head_size),
-                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.ContextAttention(f'context_attention', self._num_layers/attn_scale_factor,
+                                                     self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode,
+                                                     fmha_quant_mode, head_size=self._head_size, power_limit=power_limit),
+                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
         #router, only take it into account when num_experts >= 128
         if self._num_experts >= 128:
             self.context_ops.extend([
-                            ops.GEMM(f'context_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16)
+                            ops.GEMM(f'context_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16, power_limit=power_limit)
                             ])
 
         # dispatch tokens to experts, moe calc and get tokens back
         self.context_ops.extend([
                                 ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, True),
-                                ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size),
+                                ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size, power_limit=power_limit),
                                 ops.MoEDispatch(f'context_moe_post_dispatch', self._num_layers, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, False)])
-        
-        self.context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+
+        self.context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
 
         self.generation_ops.extend([ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'generation_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
-                                ops.GenerationAttention(f'generation_attention', self._num_layers/attn_scale_factor, 
-                                                        self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, 
-                                                        head_size=self._head_size),
-                                ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.GenerationAttention(f'generation_attention', self._num_layers/attn_scale_factor,
+                                                        self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode,
+                                                        head_size=self._head_size, power_limit=power_limit),
+                                ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
         #router, only take it into account when num_experts >= 128
         if self._num_experts >= 128:
             self.generation_ops.extend([
-                            ops.GEMM(f'generation_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16)
+                            ops.GEMM(f'generation_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16, power_limit=power_limit)
                             ])
 
         # dispatch tokens to experts, moe calc and get tokens back
         self.generation_ops.extend([
                                 ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, True),
-                                ops.MoE(f'generation_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size),
+                                ops.MoE(f'generation_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size, power_limit=power_limit),
                                 ops.MoEDispatch(f'generation_moe_post_dispatch', self._num_layers, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, False)
                                 ])
         # logits gemm
-        self.generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+        self.generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
 
         # # # when tp_size=0, the comm part will be 0
         # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
@@ -387,37 +392,38 @@ class DeepSeekModel(BaseModel):
 
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        power_limit = self.config.power_limit
         workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
 
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'context_downscale_gemm', self._num_layers, 2112, h, gemm_quant_mode), # on every gpu, fused_a
-                                ops.GEMM(f'context_q_b_proj_gemm', self._num_layers, 24576//tp_size, 1536, gemm_quant_mode),
-                                ops.GEMM(f'context_kv_b_proj_gemm', self._num_layers, 32768//tp_size, 512, gemm_quant_mode), # agg ctx attn part
+                                ops.GEMM(f'context_downscale_gemm', self._num_layers, 2112, h, gemm_quant_mode, power_limit=power_limit), # on every gpu, fused_a
+                                ops.GEMM(f'context_q_b_proj_gemm', self._num_layers, 24576//tp_size, 1536, gemm_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'context_kv_b_proj_gemm', self._num_layers, 32768//tp_size, 512, gemm_quant_mode, power_limit=power_limit), # agg ctx attn part
                                 ops.ContextMLA(f'context_attention', self._num_layers, 128//tp_size, kvcache_quant_mode, fmha_quant_mode), # agg ctx attn part
-                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, 128*128//tp_size, gemm_quant_mode), # agg ctx attn part
+                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, 128*128//tp_size, gemm_quant_mode, power_limit=power_limit), # agg ctx attn part
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
         # shared moe
         self.context_ops.extend([
-                                ops.GEMM(f'context_shared_gate_gemm', self._num_layers, self._moe_inter_size//tp_size, h, gemm_quant_mode),
-                                ops.GEMM(f'context_shared_ffn1_gemm', self._num_layers, self._moe_inter_size//tp_size, h, gemm_quant_mode),
+                                ops.GEMM(f'context_shared_gate_gemm', self._num_layers, self._moe_inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'context_shared_ffn1_gemm', self._num_layers, self._moe_inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'context_shared_act_gate', self._num_layers, 2*self._moe_inter_size//tp_size, self._moe_inter_size//tp_size, 0.8),
-                                ops.GEMM(f'context_shared_ffn2_gemm', self._num_layers, h, self._moe_inter_size//tp_size, gemm_quant_mode)
+                                ops.GEMM(f'context_shared_ffn2_gemm', self._num_layers, h, self._moe_inter_size//tp_size, gemm_quant_mode, power_limit=power_limit)
                                 ])
-        
+
         # router gemm, num_experts is large enough, cannot be ignored anymore.
         self.context_ops.extend([
-                                ops.GEMM(f'context_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16)
+                                ops.GEMM(f'context_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16, power_limit=power_limit)
                                 ])
 
         # dispatch tokens to experts, pre-dispatch
         self.context_ops.extend([
                                 ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, True)
                                 ])
-        
+
         # moe part
-        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size)
+        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size, power_limit=power_limit)
                                 ])
 
         # dispatch tokens to experts, post-dispatch
@@ -425,38 +431,38 @@ class DeepSeekModel(BaseModel):
                                 ops.MoEDispatch(f'context_moe_post_dispatch', self._num_layers, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, False)
                                 ])
 
-        self.context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+        self.context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
         #####generation part, only generation part is scaled by mtp_scale_factor
         self.generation_ops.extend([ops.Embedding(f'generation_embedding', 1*self._mtp_scale_factor, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'generation_add_norm_1', self._num_layers*self._mtp_scale_factor, 2*h, 2*h, 0.8),
-                                ops.GEMM(f'generation_downscale_gemm', self._num_layers*self._mtp_scale_factor, 2112, h, gemm_quant_mode), # on every gpu
-                                ops.GEMM(f'generation_q_b_proj_gemm', self._num_layers*self._mtp_scale_factor, 24576//tp_size, 1536, gemm_quant_mode),
+                                ops.GEMM(f'generation_downscale_gemm', self._num_layers*self._mtp_scale_factor, 2112, h, gemm_quant_mode, power_limit=power_limit), # on every gpu
+                                ops.GEMM(f'generation_q_b_proj_gemm', self._num_layers*self._mtp_scale_factor, 24576//tp_size, 1536, gemm_quant_mode, power_limit=power_limit),
                                 ops.MLABmm(f'generation_bmm_pre', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=True), # agg gen attn part
                                 ops.GenerationMLA(f'generation_attention', self._num_layers*self._mtp_scale_factor, 128//tp_size, kvcache_quant_mode), # agg gen attn part
                                 ops.MLABmm(f'generation_bmm_post', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=False), # agg gen attn part
-                                ops.GEMM(f'generation_proj_gemm', self._num_layers*self._mtp_scale_factor, h, h//tp_size, gemm_quant_mode),
+                                ops.GEMM(f'generation_proj_gemm', self._num_layers*self._mtp_scale_factor, h, h//tp_size, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers*self._mtp_scale_factor, 2*h, 2*h, 0.8)])
 
         # shared moe
         self.generation_ops.extend([
-                                ops.GEMM(f'generation_shared_gate_gemm', self._num_layers*self._mtp_scale_factor, self._moe_inter_size//tp_size, h, gemm_quant_mode),
-                                ops.GEMM(f'generation_shared_ffn1_gemm', self._num_layers*self._mtp_scale_factor, self._moe_inter_size//tp_size, h, gemm_quant_mode),
+                                ops.GEMM(f'generation_shared_gate_gemm', self._num_layers*self._mtp_scale_factor, self._moe_inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
+                                ops.GEMM(f'generation_shared_ffn1_gemm', self._num_layers*self._mtp_scale_factor, self._moe_inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                 ops.ElementWise(f'generation_shared_act_gate', self._num_layers*self._mtp_scale_factor, 2*self._moe_inter_size//tp_size, self._moe_inter_size//tp_size, 0.8),
-                                ops.GEMM(f'generation_shared_ffn2_gemm', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size//tp_size, gemm_quant_mode)
-                                ])     
-        
+                                ops.GEMM(f'generation_shared_ffn2_gemm', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size//tp_size, gemm_quant_mode, power_limit=power_limit)
+                                ])
+
         # router gemm, num_experts is large enough, cannot be ignored anymore.
         self.generation_ops.extend([
-                                ops.GEMM(f'generation_router_gemm', self._num_layers*self._mtp_scale_factor, self._num_experts, h, common.GEMMQuantMode.float16)
+                                ops.GEMM(f'generation_router_gemm', self._num_layers*self._mtp_scale_factor, self._num_experts, h, common.GEMMQuantMode.float16, power_limit=power_limit)
                                 ])
 
         # dispatch tokens to experts, pre-dispatch
         self.generation_ops.extend([
                                 ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, True)
                                 ])
-   
+
         # moe part
-        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size),
+        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size, power_limit=power_limit),
                                 ])
 
         # dispatch tokens to experts, post-dispatch
@@ -464,7 +470,7 @@ class DeepSeekModel(BaseModel):
                                 ops.MoEDispatch(f'generation_moe_post_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, False)
                                 ])
 
-        self.generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1*self._mtp_scale_factor, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+        self.generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1*self._mtp_scale_factor, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit)])
 
         # when tp_size=0, the comm part will be 0
         # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
@@ -501,12 +507,13 @@ class DisaggDeepSeekModel(BaseModel):
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
-        
+
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
+        power_limit = self.config.power_limit
 
         self._power_law_alpha = 0.8
         workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
@@ -521,32 +528,32 @@ class DisaggDeepSeekModel(BaseModel):
 
         # shared expert
         self.context_ops.extend([ops.MLP(f'context_shared_expert', self._num_layers, h, self._moe_inter_size, moe_quant_mode)])
-        
+
         # dispatch tokens to experts
-        self.context_ops.extend([ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts, 
-                                                 moe_tp_size, moe_ep_size, attention_dp_size, True, 
+        self.context_ops.extend([ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts,
+                                                 moe_tp_size, moe_ep_size, attention_dp_size, True,
                                                  sms=sms, node_num=node_num, moe_backend=moe_backend, is_context=True)])
-        
+
         # moe computation
-        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, 
-                                         moe_tp_size, moe_ep_size, moe_quant_mode, 'uniform', 
-                                         attention_dp_size, is_context=True, moe_backend=moe_backend)])
+        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts,
+                                         moe_tp_size, moe_ep_size, moe_quant_mode, 'uniform',
+                                         attention_dp_size, is_context=True, moe_backend=moe_backend, power_limit=power_limit)])
 
         # generation mla attention
         self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode, attn_backend)])
 
         # shared expert
         self.generation_ops.extend([ops.MLP(f'generation_shared_expert', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, moe_quant_mode)])
-        
+
         # dispatch tokens to experts
-        self.generation_ops.extend([ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, 
-                                                    moe_tp_size, moe_ep_size, attention_dp_size, True, 
+        self.generation_ops.extend([ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts,
+                                                    moe_tp_size, moe_ep_size, attention_dp_size, True,
                                                     sms=sms, node_num=node_num, moe_backend=moe_backend, is_context=False)])
-   
+
         # moe computation
-        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, 
-                                            moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, 
-                                            attention_dp_size, is_context=False, moe_backend=moe_backend)])
+        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts,
+                                            moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution,
+                                            attention_dp_size, is_context=False, moe_backend=moe_backend, power_limit=power_limit)])
 
 
 class NemotronNas(BaseModel):
@@ -631,27 +638,28 @@ class NemotronNas(BaseModel):
             gemm_quant_mode = self.config.gemm_quant_mode
             kvcache_quant_mode = self.config.kvcache_quant_mode
             fmha_quant_mode = self.config.fmha_quant_mode
+            power_limit = self.config.power_limit
             pp_scale_factor = pp_size-1
             self._context_ops.append(ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3))
             for b in puzzle_block_configs:
-                count = b.num_inst   
+                count = b.num_inst
                 if not b.attn_no_op:
                     num_kv_heads = self._num_heads // b.attn_n_heads_in_group
                     num_kv_heads_per_GPU = (num_kv_heads + tp_size - 1) // tp_size
                     self._context_ops.extend([ops.ElementWise(f'context_add_norm_1', count, 2*h, 2*h, 0.8),
-                                            ops.GEMM(f'context_qkv_gemm', count, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode), 
-                                            ops.ContextAttention(f'context_attention', count, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
-                                            ops.GEMM(f'context_proj_gemm', count, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                            ops.GEMM(f'context_qkv_gemm', count, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                            ops.ContextAttention(f'context_attention', count, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode, power_limit=power_limit),
+                                            ops.GEMM(f'context_proj_gemm', count, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                             ops.AllReduce('context_ar_1', count, h, tp_size)])
                 if not b.ffn_no_op:
                     inter_size = self._ffn_mult_to_intermediate_size(b.ffn_ffn_mult)
                     self._context_ops.extend([ops.ElementWise(f'context_add_norm_2', count, 2*h, 2*h, 0.8),
-                                            ops.GEMM(f'context_gate_ffn1_gemm', count, 2*inter_size//tp_size, h, gemm_quant_mode),
+                                            ops.GEMM(f'context_gate_ffn1_gemm', count, 2*inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                             ops.ElementWise(f'context_act_gate', count, 2*inter_size//tp_size, inter_size//tp_size, 0.8),
-                                            ops.GEMM(f'context_ffn2_gemm', count, h, inter_size//tp_size, gemm_quant_mode),
+                                            ops.GEMM(f'context_ffn2_gemm', count, h, inter_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                             ops.AllReduce('context_ar_2', count, h, tp_size)])
             self._context_ops.append(ops.P2P('context_p2p', pp_scale_factor, h, pp_size))
-            self._context_ops.append(ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16))
+            self._context_ops.append(ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit))
 
     @property
     def generation_ops(self):
@@ -696,27 +704,28 @@ class NemotronNas(BaseModel):
             gemm_quant_mode = self.config.gemm_quant_mode
             kvcache_quant_mode = self.config.kvcache_quant_mode
             fmha_quant_mode = self.config.fmha_quant_mode
+            power_limit = self.config.power_limit
             pp_scale_factor = pp_size-1
             self._generation_ops.append(ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3))
             for b in puzzle_block_configs:
-                count = b.num_inst 
+                count = b.num_inst
                 if not b.attn_no_op:
                     num_kv_heads = self._num_heads // b.attn_n_heads_in_group
                     num_kv_heads_per_GPU = (num_kv_heads + tp_size - 1) // tp_size
                     self._generation_ops.extend([ops.ElementWise(f'generation_add_nrom_1', count, 2*h, 2*h, 0.8),
-                                                ops.GEMM(f'generation_qkv_gemm', count, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode), 
-                                                ops.GenerationAttention(f'generation_attention', count, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode),
-                                                ops.GEMM(f'generation_proj_gemm', count, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+                                                ops.GEMM(f'generation_qkv_gemm', count, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode, power_limit=power_limit),
+                                                ops.GenerationAttention(f'generation_attention', count, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, power_limit=power_limit),
+                                                ops.GEMM(f'generation_proj_gemm', count, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                                 ops.AllReduce('generation_ar_1', count, h, tp_size)])
                 if not b.ffn_no_op:
                     inter_size = self._ffn_mult_to_intermediate_size(b.ffn_ffn_mult)
                     self._generation_ops.extend([ops.ElementWise(f'generation_add_norm_2', count, 2*h, 2*h, 0.8),
-                                                ops.GEMM(f'generation_gate_ffn1_gemm', count, 2*inter_size//tp_size, h, gemm_quant_mode),
+                                                ops.GEMM(f'generation_gate_ffn1_gemm', count, 2*inter_size//tp_size, h, gemm_quant_mode, power_limit=power_limit),
                                                 ops.ElementWise(f'generation_act_gate', count, 2*inter_size//tp_size, inter_size//tp_size, 0.8),
-                                                ops.GEMM(f'generation_ffn2_gemm', count, h, inter_size//tp_size, gemm_quant_mode),
+                                                ops.GEMM(f'generation_ffn2_gemm', count, h, inter_size//tp_size, gemm_quant_mode, power_limit=power_limit),
                                                 ops.AllReduce('generation_ar_2', count, h, tp_size)])
             self._generation_ops.append(ops.P2P('generation_p2p', pp_scale_factor, h, pp_size))
-            self._generation_ops.append(ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16))
+            self._generation_ops.append(ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16, power_limit=power_limit))
     
     
     def _ffn_mult_to_intermediate_size(self, ffn_mult: float) -> int:
