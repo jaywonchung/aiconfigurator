@@ -71,47 +71,60 @@ class TRTLLMBackend(BaseBackend):
                 num_genonly_tokens = 1
                 num_mix_steps_for_tpot_calc = 0
 
-            def _get_mix_step_latency(model: BaseModel, database: PerfDatabase, ctx_tokens: int, gen_tokens: int, isl: int, osl: int) -> float:
+            def _get_mix_step_latency(model: BaseModel, database: PerfDatabase, ctx_tokens: int, gen_tokens: int, isl: int, osl: int) -> tuple[float, float]:
                 num_tokens = ctx_tokens + gen_tokens
                 summary = self.run_static(model, database, RuntimeConfig(batch_size=1, beam_width=1, isl=num_tokens, osl=1), mode='static_ctx')
                 latency_dict = summary.get_context_latency_dict()
+                energy_dict = summary.get_context_energy_dict()
                 non_attention_latency = 0.
-                #TODO, fix for DS. DS has different ops for attn in ctx and gen. 
+                non_attention_energy = 0.
+                #TODO, fix for DS. DS has different ops for attn in ctx and gen.
                 for layer_name, latency in latency_dict.items():
                     if layer_name != 'context_attention':
                         non_attention_latency += latency
+                        non_attention_energy += energy_dict.get(layer_name, 0.0)
 
                 # second pass to get ctx attn, split full isl over num_steps(=np.ceil(isl/ctx_tokens)), average the ctx attn latency
                 num_tokens = isl
                 summary = self.run_static(model, database, RuntimeConfig(batch_size=1, beam_width=1, isl=num_tokens, osl=1), mode='static_ctx')
                 latency_dict = summary.get_context_latency_dict()
+                energy_dict = summary.get_context_energy_dict()
                 ctx_attention_latency = latency_dict['context_attention'] / (np.ceil(isl/ctx_tokens))
-            
+                ctx_attention_energy = energy_dict.get('context_attention', 0.0) / (np.ceil(isl/ctx_tokens))
+
                 # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
                 if gen_tokens > 0:
                     num_tokens = gen_tokens
                     summary = self.run_static(model, database, RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl+osl//2, osl=2), mode='static_gen')
                     latency_dict = summary.get_generation_latency_dict()
+                    energy_dict = summary.get_generation_energy_dict()
                     gen_attention_latency = latency_dict['generation_attention']
+                    gen_attention_energy = energy_dict.get('generation_attention', 0.0)
                 else:
                     gen_attention_latency = 0.
+                    gen_attention_energy = 0.
 
-                return non_attention_latency + ctx_attention_latency + gen_attention_latency
+                total_latency = non_attention_latency + ctx_attention_latency + gen_attention_latency
+                total_energy = non_attention_energy + ctx_attention_energy + gen_attention_energy
+                return total_latency, total_energy
                 
-            def _get_genonly_step_latency(model: BaseModel, database: PerfDatabase, gen_tokens: int, isl: int, osl: int) -> float:
+            def _get_genonly_step_latency(model: BaseModel, database: PerfDatabase, gen_tokens: int, isl: int, osl: int) -> tuple[float, float]:
                 if gen_tokens <= 0:
-                    return 0.
+                    return 0., 0.
                 num_tokens = gen_tokens
                 summary = self.run_static(model, database, RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl+osl//2, osl=2), mode='static_gen')
                 latency_dict = summary.get_generation_latency_dict()
+                energy_dict = summary.get_generation_energy_dict()
                 genonly_step_latency = 0.
+                genonly_step_energy = 0.
                 for layer_name, latency in latency_dict.items():
                     genonly_step_latency += latency
-                
-                return genonly_step_latency
+                    genonly_step_energy += energy_dict.get(layer_name, 0.0)
 
-            mix_step_latency = _get_mix_step_latency(model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl)
-            genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
+                return genonly_step_latency, genonly_step_energy
+
+            mix_step_latency, mix_step_energy = _get_mix_step_latency(model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl)
+            genonly_step_latency, genonly_step_energy = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl/ctx_tokens)
             # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency (batch size here) to mitigate the impact of first round latency
@@ -167,10 +180,13 @@ class TRTLLMBackend(BaseBackend):
                 if getattr(model.config, "power_limit", None) is not None
                 else np.nan
             )
-            avg_power = np.nan
-            total_cluster_power = (
-                avg_power * num_total_gpus if not np.isnan(avg_power) else np.nan
-            )
+
+            # Calculate average power from energy and latency
+            total_energy = mix_step_energy * num_mix_steps + genonly_step_energy * num_genonly_steps
+            total_time = mix_step_latency * num_mix_steps + genonly_step_latency * num_genonly_steps
+            avg_power = total_energy / total_time if total_time > 0 else 0.0
+
+            total_cluster_power = avg_power * num_total_gpus
             within_power_budget = np.nan
             gen_tokens = max(num_tokens - ctx_tokens, 0)
 

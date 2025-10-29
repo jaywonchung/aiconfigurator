@@ -26,30 +26,32 @@ logger = logging.getLogger(__name__)
 def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus: int, tpot_target: float, top: int, is_moe: bool) -> str:
     """Plot worker setup table for a single experiment."""
     buf = []
-    
+
     if config_df is None or config_df.empty:
         return ""
 
     config_df['tokens/s/gpu_cluster'] = config_df['tokens/s/gpu'] * (total_gpus // config_df['num_total_gpus']) \
         * config_df['num_total_gpus'] / total_gpus if total_gpus > 0 else 0
-    top_configs = config_df[config_df['tpot'] <= tpot_target].sort_values(by='tokens/s/gpu_cluster', ascending=False).head(top).copy()
-    
+    # Show all configs instead of just top N
+    top_configs = config_df[config_df['tpot'] <= tpot_target].sort_values(by='tokens/s/gpu_cluster', ascending=False).copy()
+
     if top_configs.empty:
         return f"\nNo configurations for {exp_name} met the TPOT constraint."
 
     top_configs['replicas'] = total_gpus // top_configs['num_total_gpus']
     top_configs['total_gpus_used'] = top_configs['num_total_gpus'] * top_configs['replicas']
-    
-    buf.append(f"\n{exp_name} Top Configurations: (Sorted by tokens/s/gpu)")
+
+    buf.append(f"\n{exp_name} Pareto-Optimal Configurations: (Sorted by tokens/s/gpu)")
     table = PrettyTable()
     
     # Check if it is disagg config by checking for prefill/decode specific columns
     is_disagg = '(p)tp' in top_configs.columns
 
     if is_disagg:
-        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "concurrency", "total_gpus(used)", "replicas", "gpus/replica", 
-                             "(p)workers", "(p)gpus/worker", "(p)parallel", "(p)bs",
-                             "(d)workers", "(d)gpus/worker", "(d)parallel", "(d)bs"]
+        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "TPOT", "concurrency", "total_gpus(used)", "replicas", "gpus/replica",
+                             "(p)workers", "(p)gpus/worker", "(p)parallel", "(p)bs", "(p)power_limit", "(p)power/GPU",
+                             "(d)workers", "(d)gpus/worker", "(d)parallel", "(d)bs", "(d)power_limit", "(d)power/GPU",
+                             "cluster_power"]
         for i, row in enumerate(top_configs.to_dict('records')):
             if is_moe:
                 p_parallel = f'tp\033[4m{row["(p)tp"]}\033[0mpp\033[4m{row["(p)pp"]}\033[0mdp\033[4m{row["(p)dp"]}\033[0metp{row["(p)moe_tp"]}ep{row["(p)moe_ep"]}'
@@ -61,17 +63,25 @@ def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus:
                 d_parallel = f'tp\033[4m{row["(d)tp"]}\033[0mpp\033[4m{row["(d)pp"]}\033[0m'
                 p_gpus_worker = f'{row["(p)pp"]*row["(p)tp"]} (=\033[4m{row["(p)tp"]}\033[0mx\033[4m{row["(p)pp"]}\033[0m)'
                 d_gpus_worker = f'{row["(d)pp"]*row["(d)tp"]} (=\033[4m{row["(d)tp"]}\033[0mx\033[4m{row["(d)pp"]}\033[0m)'
+
+            p_power_limit = f"{int(row['(p)power_limit'])}W" if '(p)power_limit' in row and not pd.isna(row['(p)power_limit']) else "N/A"
+            p_power = f"{row['(p)power']:.1f}W" if '(p)power' in row and row['(p)power'] > 0 else "N/A"
+            d_power_limit = f"{int(row['(d)power_limit'])}W" if '(d)power_limit' in row and not pd.isna(row['(d)power_limit']) else "N/A"
+            d_power = f"{row['(d)power']:.1f}W" if '(d)power' in row and row['(d)power'] > 0 else "N/A"
+            cluster_power = f"{row['total_cluster_power'] * row['replicas']:.1f}W" if 'total_cluster_power' in row and row['total_cluster_power'] > 0 else "N/A"
+
             table.add_row([
-                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}",
+                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}", f"{row['tpot']:.2f}",
                 f"{row['concurrency']*row['replicas']}(={row['concurrency']}x{row['replicas']})",
                 f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})", row['replicas'],
                 f"{row['num_total_gpus']} (={row['(p)workers']}x{row['(p)pp']*row['(p)tp']*row['(p)dp']}+{row['(d)workers']}x{row['(d)pp']*row['(d)tp']*row['(d)dp']})",
-                row['(p)workers'], p_gpus_worker, p_parallel, row['(p)bs'],
-                row['(d)workers'], d_gpus_worker, d_parallel, row['(d)bs'],
+                row['(p)workers'], p_gpus_worker, p_parallel, row['(p)bs'], p_power_limit, p_power,
+                row['(d)workers'], d_gpus_worker, d_parallel, row['(d)bs'], d_power_limit, d_power,
+                cluster_power,
             ])
     else: # agg
-        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "concurrency", "total_gpus(used)", 
-                             "replicas", "gpus/replica", "gpus/worker", "parallel", "bs"]
+        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "TPOT", "concurrency", "total_gpus(used)",
+                             "replicas", "gpus/replica", "gpus/worker", "parallel", "bs", "power_limit", "power/GPU", "cluster_power"]
         for i, row in enumerate(top_configs.to_dict('records')):
             if is_moe:
                 parallel = f'tp\033[4m{row["tp"]}\033[0mpp\033[4m{row["pp"]}\033[0mdp\033[4m{row["dp"]}\033[0metp{row["moe_tp"]}ep{row["moe_ep"]}'
@@ -79,11 +89,16 @@ def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus:
             else:
                 parallel = f'tp\033[4m{row["tp"]}\033[0mpp\033[4m{row["pp"]}\033[0m'
                 gpus_worker = f'{row["pp"]*row["tp"]} (=\033[4m{row["tp"]}\033[0mx\033[4m{row["pp"]}\033[0m)'
+
+            power_limit = f"{int(row['power_limit'])}W" if 'power_limit' in row and not pd.isna(row['power_limit']) else "N/A"
+            per_gpu_power = f"{row['power']:.1f}W" if 'power' in row and row['power'] > 0 else "N/A"
+            cluster_power = f"{row['total_cluster_power'] * row['replicas']:.1f}W" if 'total_cluster_power' in row and row['total_cluster_power'] > 0 else "N/A"
+
             table.add_row([
-                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}",
+                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}", f"{row['tpot']:.2f}",
                 f"{row['concurrency']*row['replicas']}(={row['concurrency']}x{row['replicas']})", f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                 row['replicas'], row['num_total_gpus'],
-                gpus_worker, parallel, row['bs']
+                gpus_worker, parallel, row['bs'], power_limit, per_gpu_power, cluster_power
             ])
             
     buf.append(table.get_string())
@@ -211,11 +226,13 @@ def log_final_summary(
     summary_box.append(f"               gpus/replica = (p)gpus/worker * (p)workers + (d)gpus/worker * (d)workers; for Agg, gpus/replica = gpus/worker")
     summary_box.append(f"               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined \033[4mnumbers\033[0m are the actual values in math)")
     
-    # Plot worker setup tables for all experiments
-    for exp_name, config_df in best_configs.items():
+    # Plot worker setup tables for all experiments using Pareto frontier
+    for exp_name, pareto_df in pareto_fronts.items():
+        if pareto_df is None or pareto_df.empty:
+            continue
         exp_task_config = task_configs[exp_name].config
         total_gpus = getattr(task_configs[exp_name], "total_gpus", None) or 0
-        table_buf = _plot_worker_setup_table(exp_name, config_df, total_gpus, exp_task_config.runtime_config.tpot, 5, exp_task_config.is_moe)
+        table_buf = _plot_worker_setup_table(exp_name, pareto_df, total_gpus, exp_task_config.runtime_config.tpot, 5, exp_task_config.is_moe)
         summary_box.append(table_buf)
 
     summary_box.append("*" * 80)
