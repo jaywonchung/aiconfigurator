@@ -148,6 +148,10 @@ _EXPERIMENT_RESERVED_KEYS = {
     "enable_wide_ep",
     "total_gpus",
     "use_specific_quant_mode",
+    "power_limits",
+    "prefill_power_limits",
+    "decode_power_limits",
+    "cluster_power_budget",
 }
 
 
@@ -249,6 +253,93 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
 
         if serving_mode == "disagg":
             task_kwargs["decode_system_name"] = inferred_decode_system or system_name
+
+        # Power-aware overrides may be provided at the experiment level.  These
+        # should not flow into the YAML patch because the execution logic reads
+        # them directly from the TaskConfig instance.
+        def _normalize_limits(value: Any, field_name: str) -> Optional[list[int]]:
+            if value is None:
+                return None
+            if isinstance(value, list):
+                normalized: list[int] = []
+                for item in value:
+                    if isinstance(item, (int, float)) and not isinstance(item, bool):
+                        normalized.append(int(item))
+                    elif isinstance(item, str):
+                        item = item.strip()
+                        if not item:
+                            continue
+                        try:
+                            normalized.append(int(float(item)))
+                        except ValueError as exc:
+                            logger.warning(
+                                "Skipping invalid entry '%s' for %s in experiment '%s'",
+                                item,
+                                field_name,
+                                exp_name,
+                            )
+                            continue
+                    else:
+                        logger.warning(
+                            "Skipping unsupported value %s (type %s) for %s in experiment '%s'",
+                            item,
+                            type(item).__name__,
+                            field_name,
+                            exp_name,
+                        )
+                return normalized or None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return [int(value)]
+            if isinstance(value, str):
+                parts = [part.strip() for part in value.split(",")]
+                parsed = []
+                for part in parts:
+                    if not part:
+                        continue
+                    try:
+                        parsed.append(int(float(part)))
+                    except ValueError:
+                        logger.warning(
+                            "Skipping invalid entry '%s' for %s in experiment '%s'",
+                            part,
+                            field_name,
+                            exp_name,
+                        )
+                return parsed or None
+            logger.warning(
+                "Ignoring %s value of unsupported type %s in experiment '%s'",
+                field_name,
+                type(value).__name__,
+                exp_name,
+            )
+            return None
+
+        power_limits = _normalize_limits(exp_config.get("power_limits"), "power_limits")
+        if power_limits is not None:
+            task_kwargs["power_limits"] = power_limits
+
+        prefill_power_limits = _normalize_limits(
+            exp_config.get("prefill_power_limits"), "prefill_power_limits"
+        )
+        if prefill_power_limits is not None:
+            task_kwargs["prefill_power_limits"] = prefill_power_limits
+
+        decode_power_limits = _normalize_limits(
+            exp_config.get("decode_power_limits"), "decode_power_limits"
+        )
+        if decode_power_limits is not None:
+            task_kwargs["decode_power_limits"] = decode_power_limits
+
+        cluster_power_budget = exp_config.get("cluster_power_budget")
+        if cluster_power_budget is not None:
+            try:
+                task_kwargs["cluster_power_budget"] = float(cluster_power_budget)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Ignoring cluster_power_budget value '%s' for experiment '%s'",
+                    cluster_power_budget,
+                    exp_name,
+                )
 
         # Per-experiment overrides for runtime numeric parameters if provided at top level
         for numeric_key in ("isl", "osl", "ttft", "tpot"):

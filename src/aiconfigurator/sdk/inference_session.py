@@ -206,16 +206,80 @@ class DisaggInferenceSession(object):
         d_version = decode_summary_df['version']
         d_system = decode_summary_df['system']
                 
-        return pd.DataFrame([[model_name, isl, osl, 
-                              concurrency, request_rate, p_bs, p_global_bs, p_workers, d_bs, d_global_bs, d_workers, 
-                              ttft, tpot, seq_s, seq_s_gpu, tokens_s, tokens_s_gpu, tokens_s_user, p_seq_s_worker, d_seq_s_worker, 
-                              num_total_gpus,
-                              p_tp, p_pp, p_dp, p_moe_tp, p_moe_ep, p_parallel, 
-                              p_gemm, p_kvcache, p_fmha, p_moe, p_comm, p_memory, 
-                              p_backend, p_version, p_system, 
-                              d_tp, d_pp, d_dp, d_moe_tp, d_moe_ep, d_parallel, 
-                              d_gemm, d_kvcache, d_fmha, d_moe, d_comm, d_memory, 
-                              d_backend, d_version, d_system]], columns=common.ColumnsDisagg).round(3)
+        p_power_limit = prefill_summary_df['power_limit']
+        p_power = prefill_summary_df['power']
+        d_power_limit = decode_summary_df['power_limit']
+        d_power = decode_summary_df['power']
+        total_cluster_power = (
+            prefill_summary_df['total_cluster_power'] * p_workers
+            + decode_summary_df['total_cluster_power'] * d_workers
+        )
+        within_power_budget = np.nan
+
+        return pd.DataFrame(
+            [
+                [
+                    model_name,
+                    isl,
+                    osl,
+                    concurrency,
+                    request_rate,
+                    p_bs,
+                    p_global_bs,
+                    p_workers,
+                    d_bs,
+                    d_global_bs,
+                    d_workers,
+                    ttft,
+                    tpot,
+                    seq_s,
+                    seq_s_gpu,
+                    tokens_s,
+                    tokens_s_gpu,
+                    tokens_s_user,
+                    p_seq_s_worker,
+                    d_seq_s_worker,
+                    p_power_limit,
+                    p_power,
+                    d_power_limit,
+                    d_power,
+                    total_cluster_power,
+                    within_power_budget,
+                    num_total_gpus,
+                    p_tp,
+                    p_pp,
+                    p_dp,
+                    p_moe_tp,
+                    p_moe_ep,
+                    p_parallel,
+                    p_gemm,
+                    p_kvcache,
+                    p_fmha,
+                    p_moe,
+                    p_comm,
+                    p_memory,
+                    p_backend,
+                    p_version,
+                    p_system,
+                    d_tp,
+                    d_pp,
+                    d_dp,
+                    d_moe_tp,
+                    d_moe_ep,
+                    d_parallel,
+                    d_gemm,
+                    d_kvcache,
+                    d_fmha,
+                    d_moe,
+                    d_comm,
+                    d_memory,
+                    d_backend,
+                    d_version,
+                    d_system,
+                ]
+            ],
+            columns=common.ColumnsDisagg,
+        ).round(3)
 
     def run_disagg(self, 
                    model_name : str, 

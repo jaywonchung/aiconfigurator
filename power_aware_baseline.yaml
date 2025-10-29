@@ -22,8 +22,8 @@ exps:
 exp_power_sweep_agg:
   mode: "patch"
   serving_mode: "agg"
-  model_name: "LLAMA3.1_8B"
-  total_gpus: 8
+  model_name: "LLAMA3.1_70B"
+  total_gpus: 32
   system_name: "h100_sxm"
   backend_name: "trtllm"
   backend_version: "1.2.0rc0.post1"
@@ -41,7 +41,7 @@ exp_power_sweep_agg:
 
   # Optional: Set cluster power budget for filtering/visualization
   # Total power budget in Watts (e.g., 8 GPUs × 600W = 4800W)
-  cluster_power_budget: 4800.0
+  cluster_power_budget: 19200.0
 
   config:
     worker_config:
@@ -81,7 +81,7 @@ exp_power_sweep_disagg:
   decode_power_limits: [500, 600, 700]
 
   # Optional: Total cluster power budget
-  cluster_power_budget: 16000.0  # 32 GPUs × 500W avg = 16kW
+  cluster_power_budget: 19200.0
 
   config:
     prefill_worker_config:

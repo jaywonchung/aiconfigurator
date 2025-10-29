@@ -661,6 +661,14 @@ class TaskConfig:
         self.decode_power_limits = decode_power_limits
         self.cluster_power_budget = cluster_power_budget
 
+        # Propagate power-aware parameters onto the resolved config object so
+        # that downstream execution (which operates on DefaultMunch configs)
+        # observes the intended values instead of the DefaultMunch factory.
+        self.config.power_limits = power_limits
+        self.config.prefill_power_limits = prefill_power_limits
+        self.config.decode_power_limits = decode_power_limits
+        self.config.cluster_power_budget = cluster_power_budget
+
         if serving_mode == "agg":
             effective_backend_version = self.config.worker_config.backend_version
             self.backend_version = effective_backend_version

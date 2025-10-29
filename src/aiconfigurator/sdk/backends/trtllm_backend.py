@@ -162,16 +162,65 @@ class TRTLLMBackend(BaseBackend):
             comm = model.config.comm_quant_mode.name
             mem = memory['total']
             
-            result = pd.DataFrame(columns=common.ColumnsAgg, 
-                                  data=[[model.model_name, isl, osl, \
-                                         concurrency, request_rate, b, b*model.config.attention_dp_size, \
-                                         ttft, tpot, seq_s, seq_s_gpu, tokens_s, tokens_s_gpu, tokens_s_user, \
-                                         num_total_gpus, \
-                                         tp, pp, dp, moe_tp, moe_ep, parallel, \
-                                         gemm, kvcache, fmha, moe, comm, \
-                                         mem, \
-                                         balance_score, num_ctx_requests, num_gen_requests, num_tokens, ctx_tokens, num_gen_requests, \
-                                         database.backend, database.version, database.system]]).round(3)
+            power_limit_value = (
+                model.config.power_limit
+                if getattr(model.config, "power_limit", None) is not None
+                else np.nan
+            )
+            avg_power = np.nan
+            total_cluster_power = (
+                avg_power * num_total_gpus if not np.isnan(avg_power) else np.nan
+            )
+            within_power_budget = np.nan
+            gen_tokens = max(num_tokens - ctx_tokens, 0)
+
+            result = pd.DataFrame(
+                columns=common.ColumnsAgg,
+                data=[
+                    [
+                        model.model_name,
+                        isl,
+                        osl,
+                        concurrency,
+                        request_rate,
+                        b,
+                        b * model.config.attention_dp_size,
+                        ttft,
+                        tpot,
+                        seq_s,
+                        seq_s_gpu,
+                        tokens_s,
+                        tokens_s_gpu,
+                        tokens_s_user,
+                        power_limit_value,
+                        avg_power,
+                        total_cluster_power,
+                        within_power_budget,
+                        num_total_gpus,
+                        tp,
+                        pp,
+                        dp,
+                        moe_tp,
+                        moe_ep,
+                        parallel,
+                        gemm,
+                        kvcache,
+                        fmha,
+                        moe,
+                        comm,
+                        mem,
+                        balance_score,
+                        num_ctx_requests,
+                        num_gen_requests,
+                        num_tokens,
+                        ctx_tokens,
+                        gen_tokens,
+                        database.backend,
+                        database.version,
+                        database.system,
+                    ]
+                ],
+            ).round(3)
             summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
             summary.set_memory_and_check_oom(memory, database.system_spec['gpu']['mem_capacity'])
             summary.set_summary_df(result)
