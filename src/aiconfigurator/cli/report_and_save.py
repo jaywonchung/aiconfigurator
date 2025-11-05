@@ -332,14 +332,15 @@ def log_final_summary(
 
 def save_results(
     args,
-    best_configs: Dict[str, pd.DataFrame], 
-    pareto_fronts: Dict[str, pd.DataFrame], 
-    task_configs: Dict[str, TaskConfig], 
+    best_configs: Dict[str, pd.DataFrame],
+    pareto_fronts: Dict[str, pd.DataFrame],
+    task_configs: Dict[str, TaskConfig],
     save_dir: str,
+    all_explored_configs: Optional[Dict[str, pd.DataFrame]] = None,
     generated_backend_version: Optional[str] = None,
 ):
     """Save the results to a directory."""
-    
+
     first_exp_name = list(task_configs.keys())[0]
     first_task_config = task_configs[first_exp_name].config
     
@@ -375,6 +376,13 @@ def save_results(
             # 2. Save all pareto dataframe
             if pareto_df is not None:
                 pareto_df.to_csv(os.path.join(exp_dir, 'pareto.csv'), index=False)
+
+            # 2.5. Save all explored configurations if requested
+            if all_explored_configs is not None and exp_name in all_explored_configs:
+                all_configs_df = all_explored_configs[exp_name]
+                if all_configs_df is not None and not all_configs_df.empty:
+                    all_configs_df.to_csv(os.path.join(exp_dir, 'all_explored_configs.csv'), index=False)
+                    logger.info("Saved %d explored configurations to %s", len(all_configs_df), os.path.join(exp_dir, 'all_explored_configs.csv'))
 
             # 3. Save the config for this experiment
             exp_task_config = task_configs[exp_name]

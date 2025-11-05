@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
+    common_parser.add_argument("--dump-all-configs", action="store_true", help="Dump all explored configurations (not just Pareto-optimal) to CSV files.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     add_config_generation_cli(common_parser, default_backend=common.BackendName.trtllm.value)
     return common_parser
@@ -371,8 +372,8 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
 def _execute_task_configs(
     task_configs: Dict[str, TaskConfig],
     mode: str,
-) -> Tuple[str, Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, float]]:
-    """Execute the task configs and return the chosen experiment, best configs, results, and best throughputs."""
+) -> Tuple[str, Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, float]]:
+    """Execute the task configs and return the chosen experiment, best configs, pareto fronts, all explored configs, and best throughputs."""
     results: Dict[str, Dict[str, pd.DataFrame]] = {}
     start_time = time.time()
     runner = TaskRunner()
@@ -401,6 +402,7 @@ def _execute_task_configs(
     best_configs: Dict[str, pd.DataFrame] = {}
     best_throughputs: Dict[str, float] = {}
     pareto_fronts: Dict[str, Optional[pd.DataFrame]] = {}
+    all_explored_configs: Dict[str, Optional[pd.DataFrame]] = {}
     for name, task_result in results.items():
         pareto_df = task_result["pareto_df"]
         pareto_frontier_df = task_result["pareto_frontier_df"]
@@ -416,6 +418,7 @@ def _execute_task_configs(
         )
         best_configs[name] = best_config_df
         pareto_fronts[name] = pareto_frontier_df
+        all_explored_configs[name] = pareto_df
         if not best_config_df.empty:
             best_throughputs[name] = best_config_df['tokens/s/gpu_cluster'].values[0]
         else:
@@ -435,7 +438,7 @@ def _execute_task_configs(
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, pareto_fronts, best_throughputs
+    return chosen_exp, best_configs, pareto_fronts, all_explored_configs, best_throughputs
 
 
 def main(args):
@@ -451,7 +454,7 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs(
+    chosen_exp, best_configs, pareto_fronts, all_explored_configs, best_throughputs = _execute_task_configs(
         task_configs,
         args.mode,
     )
@@ -459,9 +462,10 @@ def main(args):
     if args.save_dir:
         save_results(
             args=args,
-            best_configs=best_configs, 
-            pareto_fronts=pareto_fronts, 
-            task_configs=task_configs, 
+            best_configs=best_configs,
+            pareto_fronts=pareto_fronts,
+            all_explored_configs=all_explored_configs if args.dump_all_configs else None,
+            task_configs=task_configs,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
         )

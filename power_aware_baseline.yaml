@@ -92,7 +92,7 @@ exp_power_sweep_disagg:
       num_gpu_per_worker: [4, 8]
       tp_list: [1, 2, 4, 8]
       pp_list: [1]
-      dp_list: [1]
+      dp_list: [1, 2, 4, 8]
 
     decode_worker_config:
       gemm_quant_mode: "fp8_block"
