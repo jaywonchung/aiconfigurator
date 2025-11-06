@@ -1,0 +1,327 @@
+# ============================================================================
+# GPU Count vs. Power Limit Comparison
+# ============================================================================
+# This configuration compares two strategies for power optimization:
+# 1. Using fewer GPUs at full power
+# 2. Using more GPUs at reduced power
+#
+# Analysis questions:
+# - For similar total power budgets, which is better?
+# - How does throughput scale with GPU count vs. power limit?
+# - What's the energy efficiency (tokens/s/watt) trade-off?
+# ============================================================================
+
+# Define experiments to run
+exps:
+  # 4 GPUs at different power limits (2,000W - 2,800W total)
+  # - exp_4gpu_500w
+  # - exp_4gpu_600w
+  # - exp_4gpu_700w
+
+  # 6 GPUs at different power limits (3,000W - 4,200W total)
+  # - exp_6gpu_500w
+  # - exp_6gpu_600w
+  # - exp_6gpu_700w
+
+  # 8 GPUs at different power limits (4,000W - 5,600W total)
+  - exp_8gpu_500w
+  - exp_8gpu_600w
+  - exp_8gpu_700w
+
+# ============================================================================
+# 4 GPUs Experiments
+# ============================================================================
+
+exp_4gpu_500w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 4
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [500]
+  cluster_power_budget: 2000.0  # 4 × 500W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4]
+      tp_list: [1, 2, 4]
+      pp_list: [1]
+      dp_list: [1, 2, 4]
+
+exp_4gpu_600w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 4
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [600]
+  cluster_power_budget: 2400.0  # 4 × 600W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4]
+      tp_list: [1, 2, 4]
+      pp_list: [1]
+      dp_list: [1, 2, 4]
+
+exp_4gpu_700w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 4
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [700]
+  cluster_power_budget: 2800.0  # 4 × 700W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4]
+      tp_list: [1, 2, 4]
+      pp_list: [1]
+      dp_list: [1, 2, 4]
+
+# ============================================================================
+# 6 GPUs Experiments
+# ============================================================================
+
+exp_6gpu_500w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 6
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [500]
+  cluster_power_budget: 3000.0  # 6 × 500W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4]
+      tp_list: [1, 2, 4]
+      pp_list: [1]
+      dp_list: [1, 2, 4]
+
+exp_6gpu_600w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 6
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [600]
+  cluster_power_budget: 3600.0  # 6 × 600W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4]
+      tp_list: [1, 2, 4]
+      pp_list: [1]
+      dp_list: [1, 2, 4]
+
+exp_6gpu_700w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 6
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [700]
+  cluster_power_budget: 4200.0  # 6 × 700W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4]
+      tp_list: [1, 2, 4]
+      pp_list: [1]
+      dp_list: [1, 2, 4]
+
+# ============================================================================
+# 8 GPUs Experiments
+# ============================================================================
+
+exp_8gpu_500w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 8
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [500]
+  cluster_power_budget: 4000.0  # 8 × 500W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1, 2, 4, 8]
+
+exp_8gpu_600w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 8
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [600]
+  cluster_power_budget: 4800.0  # 8 × 600W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1, 2, 4, 8]
+
+exp_8gpu_700w:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "LLAMA3.1_8B"
+  total_gpus: 8
+  system_name: "h100_sxm"
+  backend_name: "trtllm"
+  backend_version: "1.2.0rc0.post1"
+
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 100.0
+
+  power_limits: [700]
+  cluster_power_budget: 5600.0  # 8 × 700W
+
+  config:
+    worker_config:
+      gemm_quant_mode: "fp8_block"
+      moe_quant_mode: "fp8_block"
+      kvcache_quant_mode: "float16"
+      fmha_quant_mode: "float16"
+      comm_quant_mode: "half"
+      num_gpu_per_worker: [1, 2, 4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1, 2, 4, 8]
+
+# ============================================================================
+# Analysis Guidelines
+# ============================================================================
+# After running these experiments, compare:
+#
+# 1. Similar Power Budget Comparisons:
+#    - 4 GPUs @ 600W (2,400W) vs 6 GPUs @ 400W (2,400W) - need to add 400W
+#    - 4 GPUs @ 700W (2,800W) vs 8 GPUs @ 350W (2,800W) - need to add 350W
+#    - 6 GPUs @ 500W (3,000W) vs 8 GPUs @ 375W (3,000W) - need to add 375W
+#
+# 2. Metrics to Compare:
+#    - tokens/s/gpu: Per-GPU throughput
+#    - tokens/s/watt: Energy efficiency
+#    - Total cluster throughput
+#    - TPOT and TTFT: Latency metrics
+#
+# 3. Expected Findings:
+#    - More GPUs at lower power: Better parallelism, potentially better latency
+#    - Fewer GPUs at higher power: Better per-GPU efficiency, less overhead
+#    - Communication overhead increases with more GPUs (especially for TP)
+#
+# Run with:
+#   uv run aic patch gpu_vs_power_comparison.yaml --dump-all-configs
+# ============================================================================

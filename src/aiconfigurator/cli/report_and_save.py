@@ -363,6 +363,24 @@ def save_results(
         plt.savefig(os.path.join(safe_result_dir, 'pareto_frontier.png'))
         plt.close()
 
+        # Save power efficiency pareto plot
+        fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+        plt.title(f"{first_task_config.model_name} tokens/s/W vs tokens/s/user")
+        for i, (exp_name, pareto_df) in enumerate(pareto_fronts.items()):
+            if not pareto_df.empty:
+                # Calculate tokens/s/power (energy efficiency)
+                df_copy = pareto_df.copy()
+                total_gpus = getattr(task_configs[exp_name], "total_gpus", None) or 0
+                df_copy['replicas'] = total_gpus // df_copy['num_total_gpus']
+                df_copy['actual_cluster_power'] = df_copy['total_cluster_power'] * df_copy['replicas']
+                df_copy['tokens/s/power'] = (df_copy['tokens/s'] * df_copy['replicas']) / df_copy['actual_cluster_power']
+
+                pareto_analysis.draw_pareto(
+                    df_copy, 'tokens/s/user', 'tokens/s/power', ax, colors[i % len(colors)], exp_name
+                )
+        plt.savefig(os.path.join(safe_result_dir, 'pareto_frontier_power.png'))
+        plt.close()
+
         # Save each experiment's results in its own subdirectory
         for exp_name, pareto_df in pareto_fronts.items():
             exp_dir = os.path.join(safe_result_dir, exp_name)
